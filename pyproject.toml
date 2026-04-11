@@ -8,6 +8,8 @@ dependencies = [
     "requests",
     "parsel",
     "python-dotenv",
+    "pycryptodome>=3.23.0",
+    "pyotp",
 ]
 
 [project.optional-dependencies]
@@ -16,7 +18,7 @@ mcp = [
     "mcp",
 ]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest",
 ]
