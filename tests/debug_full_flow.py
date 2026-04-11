@@ -2,7 +2,6 @@
 debug_full_flow.py
 完整流程测试：登录 → 查询空闲 → 预约 → 填写工作流 → 取消预约
 """
-import asyncio
 import os
 import datetime
 
@@ -12,9 +11,9 @@ try:
 except ImportError:
     pass
 
+from fudan_spider.uis import login as uis_login
 from fudan_spider.apis.booking import (
     login_booking,
-    make_storage_state,
     get_calendar,
     launch_resource,
     fill_workflow_form,
@@ -29,17 +28,21 @@ MAJOR         = os.getenv("fudan_major", "")
 EMAIL         = os.getenv("fudan_email", "")
 ACTIVITY      = os.getenv("fudan_activity_desc", "打台球")
 APPLY_FILE    = os.getenv("fudan_application_file", "").strip("'\"") or None
-STORAGE_FILE  = "booking_storage.json"
 
 
-async def main():
-    # ── 1. 登录 ──────────────────────────────────────────────────
+def main():
+    # ── 1. 登录（UIS + workflow5 + booking）────────────────────────
     print("[1] 登录...")
-    se = login_booking(None)
-    make_storage_state(se, STORAGE_FILE)
-    print(f"    storage_state: {STORAGE_FILE}")
+    uis_se = uis_login(
+        username=os.getenv("fudan_username"),
+        password=os.getenv("fudan_password"),
+        otp_secret=os.getenv("fudan_otp_secret", ""),
+        service="https://workflow5.fudan.edu.cn/api/login/cas",
+    )
+    se = login_booking(uis_se)
+    print("    登录成功")
 
-    # ── 2. 查询明天空闲时段 ───────────────────────────────────────
+    # ── 2. 查询明天空闲时段 ─────────────────────────────────────────
     tomorrow = datetime.date.today() + datetime.timedelta(days=1)
     print(f"\n[2] 查询 {tomorrow} 的空闲时段...")
     cal = get_calendar(se, RESOURCE_ID, tomorrow)
@@ -78,7 +81,7 @@ async def main():
         print("    !! 没有可预约的场地，退出")
         return
 
-    # ── 3. 预约 ──────────────────────────────────────────────────
+    # ── 3. 提交预约 ────────────────────────────────────────────────
     print(f"\n[3] launch_resource(resource_id={free_sub_id}, period_id={period_id}, date={date_str})")
     result = launch_resource(se, free_sub_id, period_id, tomorrow)
     print(f"    结果: {result}")
@@ -86,27 +89,28 @@ async def main():
     if not result.get("is_relate"):
         print("    is_relate=False，预约直接完成（无需工作流）")
     else:
-        process_url = result["process_url"]
-        print(f"    process_url: {process_url[:80]}...")
+        reserve_id = result["process_id"]
+        print(f"    reserve_id: {reserve_id}")
 
         # ── 4. 填写工作流表单 ─────────────────────────────────────
-        print(f"\n[4] fill_workflow_form...")
-        await fill_workflow_form(
-            process_url=process_url,
-            storage_state=STORAGE_FILE,
+        print(f"\n[4] fill_workflow_form (reserve_id={reserve_id})...")
+        fill_workflow_form(
+            uis_session=uis_se,
+            reserve_id=reserve_id,
             major=MAJOR,
             email=EMAIL,
             phone=PHONE,
             activity_desc=ACTIVITY,
-            application_file=APPLY_FILE if APPLY_FILE and os.path.exists(APPLY_FILE) else None,
+            application_file=APPLY_FILE,
+            booking_session=se,
         )
         print("    [完成] 工作流表单提交成功")
 
-    # ── 5. 取消预约 ──────────────────────────────────────────────
+    # ── 5. 取消预约 ────────────────────────────────────────────────
     print(f"\n[5] cancel_reserve...")
-    await cancel_reserve(STORAGE_FILE)
+    cancel_reserve(se)
     print("    [完成] 取消预约成功")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

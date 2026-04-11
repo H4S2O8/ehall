@@ -90,42 +90,6 @@ def login_booking(uis_session: Session | None = None) -> Session:
     return se
 
 
-def make_storage_state(se: Session, path: str) -> str:
-    """
-    将 requests Session 的 cookies 转成 Playwright storage state JSON 文件。
-
-    主要处理：
-      - usk cookie 必须设到 .id.fudan.edu.cn，才能让 Playwright 在访问
-        id.fudan.edu.cn（UIS SSO）时自动携带，从而让 workflow5 识别当前用户。
-      - 其他 booking cookies domain 保持 booking.fudan.edu.cn。
-
-    :param se:   login_booking() 返回的 Session
-    :param path: 输出的 JSON 文件路径
-    :returns:    path（方便链式使用）
-    """
-    import json as _json
-
-    cookies = []
-    for c in se.cookies:
-        domain = c.domain or ""
-        if c.name == "usk" or "id.fudan.edu.cn" in domain:
-            domain = ".id.fudan.edu.cn"
-        elif not domain:
-            domain = "booking.fudan.edu.cn"
-        cookies.append({
-            "name":     c.name,
-            "value":    c.value,
-            "domain":   domain,
-            "path":     c.path or "/",
-            "sameSite": "Lax",
-            "secure":   False,
-            "httpOnly": False,
-            "expires":  -1,
-        })
-    with open(path, "w") as f:
-        _json.dump({"cookies": cookies, "origins": []}, f)
-    return path
-
 
 def get_topic_detail(se: Session, topic_id: int = TOPIC_ID) -> dict:
     """
@@ -397,103 +361,159 @@ def launch_resource(
     return body["d"]
 
 
-async def fill_workflow_form(
-    process_url: str,
-    storage_state: str,
+def fill_workflow_form(
+    uis_session: Session,
+    reserve_id: int,
     major: str,
     email: str,
     phone: str,
     activity_desc: str,
     application_file: str | None = None,
+    booking_session: Session | None = None,
 ) -> None:
     """
-    在 workflow5 工作流页面填写活动室预约申请表并提交。
+    通过纯 requests 调用 workflow5 API 填写活动室预约申请表并提交。
 
-    需要先调用 launch_resource() 获取 process_url，再调用本函数。
-    本函数依赖 Playwright（playwright.async_api）。
+    需要先调用 launch_resource() 获取 reserve_id（即 process_id），再调用本函数。
+    uis_session 需已通过 workflow5 CAS 登录（service=https://workflow5.fudan.edu.cn/api/login/cas）。
 
-    :param process_url:       launch_resource 返回的 process_url
-    :param storage_state:     Playwright storage state JSON 文件路径（含 booking cookies）
+    :param uis_session:       已完成 workflow5 SSO 登录的 requests Session
+    :param reserve_id:        launch_resource 返回的 process_id
     :param major:             专业代码（如 "081200"）
     :param email:             邮箱
     :param phone:             手机号
     :param activity_desc:     活动简介（含参与人数）
-    :param application_file:  申请表扫描件路径（台球/琴房个人申请可不传）
+    :param application_file:  申请表扫描件本地路径（可选，不传则上传 1×1 占位图）
+    :param booking_session:   login_booking() 返回的 Session（用于查询预约详情填入表单）
+                              不传时跳过 Input_22 字段
     :raises RuntimeError:     提交失败时抛出
     """
-    from playwright.async_api import async_playwright
+    import json as _json
+    import os as _os
+    import secrets
+    import string
+    import struct
+    import zlib
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
-        ctx = await browser.new_context(storage_state=storage_state)
-        page = await ctx.new_page()
+    WF_BASE = "https://workflow5.fudan.edu.cn"
+    APP_ID  = 361
 
-        await page.goto(process_url, wait_until="networkidle")
-        await page.wait_for_timeout(1500)
+    def _nanoid(size: int = 21) -> str:
+        alphabet = string.ascii_letters + string.digits + "_-"
+        return "".join(secrets.choice(alphabet) for _ in range(size))
 
-        # 处理"重新开始还是继续填写"弹窗
-        restart_btn = page.get_by_role("button", name="重新开始")
-        if await restart_btn.count() > 0:
-            await restart_btn.click()
-            await page.wait_for_timeout(1000)
+    def _tiny_png() -> bytes:
+        def chunk(t, d):
+            c = t + d
+            return struct.pack(">I", len(d)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
+        return (b"\x89PNG\r\n\x1a\n"
+                + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(b"\x00\xff\xff\xff"))
+                + chunk(b"IEND", b""))
 
-        # 等待表单字段渲染（最多 15s）
-        await page.wait_for_selector(
-            "input[placeholder='请输入专业'], textarea[placeholder='请输入专业']",
-            timeout=15000,
+    # ── 确保已登录 workflow5 ──────────────────────────────────────
+    uis_session.post(f"{WF_BASE}/site/user/front-auth")
+    r_user = uis_session.get(f"{WF_BASE}/site/user/baseinfo")
+    r_user.raise_for_status()
+    user = r_user.json()["d"]
+
+    # ── 获取预约详情字符串（填入 Input_22）────────────────────────
+    detail_info = ""
+    if booking_session is not None:
+        r_list = booking_session.get(
+            f"{BOOKING_BASE}/reservation/site/appointment/appointment-list",
+            params={"p": 1, "pageSize": 5, "type": 0},
         )
+        r_list.raise_for_status()
+        for item in (r_list.json() or {}).get("d", {}).get("data", []):
+            if item.get("process_id") == reserve_id or item.get("is_cancel") == 1:
+                for date_str, dets in item.get("detail", {}).items():
+                    for det in dets:
+                        detail_info = (
+                            f"{item['resource_name'].split('_')[-1]} "
+                            f"{date_str} {det['str_time']}"
+                        )
+                if detail_info:
+                    break
 
-        # 填写表单字段
-        await page.get_by_role("textbox", name="请输入专业").click()
-        await page.get_by_role("textbox", name="请输入专业").fill(major)
+    # ── 上传文件 ─────────────────────────────────────────────────
+    referer = (
+        f"{WF_BASE}/fe/taskCenter/matterApplication"
+        f"?force=1&app_id={APP_ID}&reserve_id={reserve_id}&platform_id=43"
+    )
+    up_headers = {
+        "Referer": f"{WF_BASE}/fe/taskCenter/matterApplication",
+        "Origin":  WF_BASE,
+    }
+    if application_file and _os.path.exists(application_file):
+        fname = _os.path.basename(application_file)
+        with open(application_file, "rb") as fh:
+            file_bytes = fh.read()
+        mime = "application/pdf" if fname.lower().endswith(".pdf") else "image/png"
+    else:
+        fname      = "申请表.png"
+        file_bytes = _tiny_png()
+        mime       = "image/png"
 
-        await page.get_by_role("textbox", name="请输入邮箱").click()
-        await page.get_by_role("textbox", name="请输入邮箱").fill(email)
+    r_up = uis_session.post(
+        f"{WF_BASE}/api/file/up",
+        files={"upfile": (fname, file_bytes, mime)},
+        headers=up_headers,
+    )
+    r_up.raise_for_status()
+    up_body = r_up.json()
+    if up_body.get("e") != "OK":
+        raise RuntimeError(f"文件上传失败: {r_up.text}")
+    file_token = up_body["d"]["token"]
+    file_name  = up_body["d"]["name"]
 
-        await page.get_by_role("textbox", name="请输入手机号").click()
-        await page.get_by_role("textbox", name="请输入手机号").fill(phone)
+    # ── 保存表单 ─────────────────────────────────────────────────
+    wf_headers = {
+        "Referer":          referer,
+        "Origin":           WF_BASE,
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    form_data = _json.dumps({"454": {
+        "User_6":   user.get("name", ""),
+        "User_16":  user.get("depart_name", ""),
+        "User_18":  user.get("number", ""),
+        "Input_17": major,
+        "Input_19": phone,
+        "Input_20": email,
+        "Input_22": detail_info,
+        "Input_24": activity_desc,
+        "File_27":  [{"id": _nanoid(), "token": file_token, "name": file_name,
+                      "status": "success", "sign_status": 0}],
+        "Link_30":  "链接",
+    }}, ensure_ascii=False)
 
-        await page.get_by_role("textbox", name="（需包含活动简介和参与人数）").click()
-        await page.get_by_role("textbox", name="（需包含活动简介和参与人数）").fill(activity_desc)
+    r_save = uis_session.post(
+        f"{WF_BASE}/site/app/save",
+        data={"app_id": APP_ID, "department_id": 244,
+              "form_data": form_data, "load_id[]": 0},
+        headers=wf_headers,
+    )
+    r_save.raise_for_status()
+    save_body = r_save.json()
+    if save_body.get("e") != "OK":
+        raise RuntimeError(f"app/save 失败: {r_save.text[:300]}")
 
-        # 上传文件（可选）
-        import os as _os
-        if application_file and _os.path.exists(application_file):
-            upload_btn = page.get_by_role("button", name="点击上传含负责老师签字（盖章）的申请表扫描件")
-            if await upload_btn.count() > 0:
-                async with page.expect_file_chooser() as fc_info:
-                    await upload_btn.click()
-                file_chooser = await fc_info.value
-                await file_chooser.set_files(application_file)
-                await page.wait_for_timeout(2000)
+    sess_id  = save_body["d"]["id"]
+    assignee = {
+        str(node["node_id"]): [a["id"] for a in node["assignee"]]
+        for node in save_body["d"].get("assignee", [])
+    }
 
-        # 立即提交
-        submit_btn = page.get_by_role("button", name="立即提交")
-        if await submit_btn.count() == 0:
-            await browser.close()
-            raise RuntimeError("找不到「立即提交」按钮")
-        await submit_btn.click()
-        await page.wait_for_timeout(1500)
-
-        # 确认弹窗
-        ok_btn = page.get_by_role("button", name="确认")
-        if await ok_btn.count() > 0:
-            await ok_btn.click()
-            await page.wait_for_timeout(2000)
-
-        # 检查是否有错误提示（用更精确的选择器，避免误匹配"删除"按钮）
-        error_msg = await page.evaluate("""
-            () => {
-                const el = document.querySelector(
-                    '.n-alert--error-type, .error-msg'
-                );
-                return el ? el.textContent.trim() : null;
-            }
-        """)
-        await browser.close()
-
-        if error_msg:
-            raise RuntimeError(f"提交失败: {error_msg}")
+    # ── 提交工作流 ────────────────────────────────────────────────
+    r_start = uis_session.post(
+        f"{WF_BASE}/site/app/start",
+        data={"sess_id": sess_id, "data": _json.dumps({"assignee": assignee})},
+        headers=wf_headers,
+    )
+    r_start.raise_for_status()
+    start_body = r_start.json()
+    if start_body.get("e") != "OK":
+        raise RuntimeError(f"app/start 失败: {r_start.text[:300]}")
 
 
 def book_resource(
@@ -557,45 +577,54 @@ def book_resource(
     return body["d"]
 
 
-async def cancel_reserve(
-    storage_state: str,
+def cancel_reserve(
+    se: Session,
     reserve_id: Optional[int] = None,
 ) -> None:
     """
-    在「我的预约」页面取消预约。
+    取消预约。
 
-    通过 Playwright 打开 myReservation 页面，点击「取消预约」并确认。
-    如果页面上有多条预约，可传入 reserve_id 精确匹配对应行（暂未实现，
-    默认取消第一条）。
+    调用 booking API 列出当前预约，取消第一条可取消的预约；
+    若传入 reserve_id 则精确匹配对应记录。
 
-    :param storage_state: Playwright storage state JSON 文件路径
-    :param reserve_id:    预约 ID（保留参数，当前版本取消第一条）
-    :raises RuntimeError: 找不到取消按钮或取消失败时抛出
+    :param se:         login_booking() 返回的 Session（需持有 booking cookies）
+    :param reserve_id: 预约 ID（可选，不传则取消列表中第一条可取消的记录）
+    :raises RuntimeError: 找不到可取消的预约或取消失败时抛出
     """
-    from playwright.async_api import async_playwright
+    import json as _json
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
-        ctx = await browser.new_context(storage_state=storage_state)
-        page = await ctx.new_page()
+    r = se.get(
+        f"{BOOKING_BASE}/reservation/site/appointment/appointment-list",
+        params={"p": 1, "pageSize": 20, "type": 0},
+    )
+    r.raise_for_status()
+    items = r.json().get("d", {}).get("data", [])
 
-        await page.goto(
-            f"{BOOKING_BASE}/reservation/fe/site/myReservation",
-            wait_until="networkidle",
-        )
-        await page.wait_for_timeout(1500)
+    target = None
+    for item in items:
+        if item.get("is_cancel") != 1:
+            continue
+        if reserve_id is None or item.get("id") == reserve_id:
+            target = item
+            break
 
-        cancel_btn = page.get_by_role("button", name="取消预约")
-        if await cancel_btn.count() == 0:
-            await browser.close()
-            raise RuntimeError("找不到「取消预约」按钮，可能已无可取消的预约")
+    if target is None:
+        raise RuntimeError("找不到可取消的预约记录")
 
-        await cancel_btn.first.click()
-        await page.wait_for_timeout(800)
-
-        confirm_btn = page.get_by_role("button", name="确认")
-        if await confirm_btn.count() > 0:
-            await confirm_btn.click()
-            await page.wait_for_timeout(1500)
-
-        await browser.close()
+    detail_ids = [
+        det["id"]
+        for dets in target["detail"].values()
+        for det in dets
+        if det.get("is_cancel")
+    ]
+    resp = se.post(
+        f"{BOOKING_BASE}/reservation/site/appointment/appointment-cancel",
+        data={
+            "appointment_id":        target["id"],
+            "appointment_detail_id": _json.dumps(detail_ids),
+        },
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    if body.get("e") != "OK":
+        raise RuntimeError(f"取消预约失败: {body.get('m') or body}")
