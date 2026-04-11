@@ -11,7 +11,8 @@ ehall/
 │   ├── utils.py            # 公共工具（Bark 通知等）
 │   └── apis/               # 各类 API 封装
 │       ├── card.py         # 一卡通余额查询
-│       ├── electricity.py  # 宿舍用电查询
+│       ├── electricity.py  # 宿舍用电记录（my.fudan.edu.cn）
+│       ├── zlapp_electric.py  # 宿舍剩余电量（zlapp.fudan.edu.cn）
 │       └── booking.py      # 体育场馆预约（booking.fudan.edu.cn）
 ├── tests/                  # 测试与调试脚本
 │   ├── test_phase1_login.py    # 登录流程测试
@@ -231,6 +232,8 @@ server {
 |------|------|------|
 | `card_get_info` | — | 查询一卡通余额、状态、有效期、可用校区 |
 | `electricity_get_records` | `length=10` | 查询宿舍近期用电记录（最多 100 条） |
+| `electricity_get_remaining` | — | 查询宿舍当前剩余电量（度），含已用 / 总量 |
+| `electricity_get_recharge_history` | `limit=10` | 查询电费充值历史记录 |
 
 **体育场馆（TOPIC_ID=48）**
 

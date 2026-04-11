@@ -19,8 +19,10 @@ Phase 3: 将 fudan_spider booking API 封装为 MCP Tools
 包含三组工具:
 
 Part 0 - 校园卡 & 宿舍用电:
-    card_get_info             查询一卡通余额与基本信息
-    electricity_get_records   查询宿舍近期用电记录
+    card_get_info               查询一卡通余额与基本信息
+    electricity_get_records     查询宿舍近期用电记录（my.fudan.edu.cn）
+    electricity_get_remaining   查询宿舍当前剩余电量（zlapp.fudan.edu.cn）
+    electricity_get_recharge_history  查询电费充值历史
 
 Part 1 - 体育场馆（TOPIC_ID=48, /api/ 系 API）:
     sports_list_venues        查询所有体育场馆列表
@@ -51,6 +53,7 @@ from requests import Session
 _booking_session: Optional[Session] = None
 _uis_session: Optional[Session] = None   # 用于 workflow5 登录（活动室工作流）
 _my_session: Optional[Session] = None    # 用于 my.fudan.edu.cn（一卡通、用电）
+_zlapp_session: Optional[Session] = None # 用于 zlapp.fudan.edu.cn（剩余电量）
 
 
 def _get_booking_session() -> Session:
@@ -124,6 +127,24 @@ def _get_my_session() -> Session:
     return _my_session
 
 
+def _get_zlapp_session() -> Session:
+    """获取（或重建）zlapp.fudan.edu.cn 的 session（剩余电量）。"""
+    global _zlapp_session
+    from fudan_spider.uis import login as uis_login
+    from fudan_spider.apis.zlapp_electric import zlapp_sso_login
+
+    if _zlapp_session is None:
+        _zlapp_session = uis_login(
+            username=os.getenv("fudan_username"),
+            password=os.getenv("fudan_password"),
+            otp_secret=os.getenv("fudan_otp_secret", ""),
+        )
+
+    # 探活：zlapp_sso_login 内部会检查是否已登录，未登录则自动完成 SSO
+    zlapp_sso_login(_zlapp_session)
+    return _zlapp_session
+
+
 # ── FastMCP App ────────────────────────────────────────────────────────────
 app = FastMCP("fudan-booking")
 
@@ -182,6 +203,51 @@ def electricity_get_records(length: int = 10) -> list[dict]:
     # raw["data"] 是二维列表 [[日期, 宿舍, 用电量], ...]
     rows = raw.get("data", [])
     return [{"date": r[0], "dorm": r[1], "kwh": r[2]} for r in rows]
+
+
+@app.tool()
+def electricity_get_remaining() -> dict:
+    """
+    查询宿舍当前剩余电量（来自 zlapp.fudan.edu.cn）。
+
+    返回示例:
+        {
+          "campus":      "江湾",
+          "building":    "15号楼",
+          "room":        "323",
+          "surplus_kwh": 23.08,
+          "used_kwh":    3360.4,
+          "total_kwh":   3383.48
+        }
+
+    surplus_kwh 即剩余电量（度），used_kwh 为已用，total_kwh 为账户总量。
+    """
+    from fudan_spider.apis.zlapp_electric import get_electric_info
+    se = _get_zlapp_session()
+    return get_electric_info(se)
+
+
+@app.tool()
+def electricity_get_recharge_history(limit: int = 10) -> list[dict]:
+    """
+    查询宿舍电费充值历史记录（来自 zlapp.fudan.edu.cn）。
+
+    :param limit: 返回条数，默认 10 条。
+
+    返回示例:
+        [
+          {
+            "time":   "2026-01-13 23:09:21",
+            "amount": 10,
+            "room":   "江湾/江湾/15号楼/323",
+            "campus": "江湾"
+          },
+          ...
+        ]
+    """
+    from fudan_spider.apis.zlapp_electric import get_recharge_history
+    se = _get_zlapp_session()
+    return get_recharge_history(se, limit=limit)
 
 
 # ══════════════════════════════════════════════════════════════════════════
