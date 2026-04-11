@@ -1,0 +1,22 @@
+[project]
+name = "ehall"
+version = "0.1.0"
+description = "复旦校园自动化工具集：UIS登录、API封装、自动化脚本、MCP Server"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests",
+    "parsel",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+# Phase 3: MCP Server
+mcp = [
+    "mcp",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest",
+]

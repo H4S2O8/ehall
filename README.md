@@ -33,15 +33,16 @@ ehall/
 ## 快速开始
 
 ```bash
-# 1. 安装依赖
-pip install -r requirements.txt
+# 1. 创建虚拟环境并安装依赖（需安装 uv）
+uv sync
 
 # 2. 配置账号
 cp .env.example .env
 # 编辑 .env，填入学号和密码
 
-# 3. 运行 Phase 1 登录测试
-python -m tests.test_phase1_login
+# 3. 运行测试
+uv run python -m tests.test_phase1_login
+uv run python -m tests.test_phase1_apis
 ```
 
 ## 环境变量

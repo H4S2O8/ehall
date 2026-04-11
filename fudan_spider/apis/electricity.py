@@ -27,7 +27,7 @@ def get_electricity(se: Session, length: int = 20) -> dict:
     }
     resp = se.post(
         "https://my.fudan.edu.cn/data_tables/ykt_xszsqyydqk.json",
-        json=payload,
+        data=payload,
     )
     resp.raise_for_status()
     return resp.json()
