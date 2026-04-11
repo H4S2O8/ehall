@@ -1,0 +1,7 @@
+# ── Phase 1 & 2: 爬虫核心 ──────────────────────────────
+requests
+parsel
+python-dotenv
+
+# ── Phase 3: MCP Server ────────────────────────────────
+# mcp
