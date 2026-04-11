@@ -49,7 +49,7 @@ uv run python -m tests.test_phase1_booking  # 体育场馆预约
 | `fudan_password` | UIS 密码 | ✅ |
 | `fudan_otp_secret` | TOTP 动态口令密钥（base32），开启 MFA 的账号必填 | 视账号而定 |
 | `fudan_phone` | 手机号（活动室预约必填） | 视场馆而定 |
-| `fudan_major` | 专业代码（如 `081200`，活动室预约必填） | 视场馆而定 |
+| `fudan_major` | 专业（活动室预约必填，内容随意） | 视场馆而定 |
 | `fudan_email` | 邮箱（活动室预约必填） | 视场馆而定 |
 | `fudan_activity_desc` | 活动简介（如 `打台球`） | 视场馆而定 |
 | `fudan_application_file` | 申请表扫描件路径（可选，不填则上传占位图片） | 可选 |
