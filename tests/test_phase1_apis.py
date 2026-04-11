@@ -70,10 +70,10 @@ def test_electricity(se):
         return True
 
     print(f"  共 {total} 条记录，显示最近 {len(rows)} 条：\n")
-    print(f"  {'宿舍':<30} {'日期':<14} {'用电(度)'}")
-    print(f"  {'─'*30} {'─'*12} {'─'*8}")
-    for room, date, kwh in rows:
-        print(f"  {room:<30} {date:<14} {kwh}")
+    print(f"  {'日期':<14} {'宿舍':<30} {'用电(度)'}")
+    print(f"  {'─'*12} {'─'*30} {'─'*8}")
+    for date, room, kwh in rows:
+        print(f"  {date:<14} {room:<30} {kwh}")
 
     print("\n[PASS] 用电记录查询成功")
     return True
