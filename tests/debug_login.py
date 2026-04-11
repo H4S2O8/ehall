@@ -56,4 +56,4 @@ print(f"  body[:300]: {r4.text[:300]}")
 print("\n" + "=" * 60)
 print("当前 cookies:")
 for c in se.cookies:
-    print(f"  {c.domain:30} {c.name}={c.value[:20]}...")
+    print(f"  {c.domain:30} {c.name}={c.value[:4]}***")

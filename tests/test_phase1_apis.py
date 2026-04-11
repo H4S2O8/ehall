@@ -46,8 +46,14 @@ def test_card(se):
     # data 格式: [学号, 姓名, 状态, 校区, 有效期, 余额]
     fields = ["学号", "姓名", "状态", "可用校区", "有效期", "余额(元)"]
     for k, v in zip(fields, row):
-        # 学号脱敏
-        display = f"{str(v)[:3]}***" if k == "学号" else v
+        # 学号、姓名脱敏
+        if k == "学号":
+            display = f"{str(v)[:3]}***"
+        elif k == "姓名":
+            s = str(v)
+            display = s[0] + "*" * (len(s) - 1) if len(s) > 0 else v
+        else:
+            display = v
         print(f"  {k}: {display}")
 
     print("[PASS] 一卡通查询成功")
