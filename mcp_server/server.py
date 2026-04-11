@@ -16,7 +16,11 @@ Phase 3: 将 fudan_spider booking API 封装为 MCP Tools
     fudan_email          邮箱（预约活动室必填）
     fudan_activity_desc  活动简介（预约活动室必填）
 
-包含两组工具:
+包含三组工具:
+
+Part 0 - 校园卡 & 宿舍用电:
+    card_get_info             查询一卡通余额与基本信息
+    electricity_get_records   查询宿舍近期用电记录
 
 Part 1 - 体育场馆（TOPIC_ID=48, /api/ 系 API）:
     sports_list_venues        查询所有体育场馆列表
@@ -46,6 +50,7 @@ from requests import Session
 # ── 全局 Session 缓存（lazy init，避免每次 tool call 重新登录）──────────
 _booking_session: Optional[Session] = None
 _uis_session: Optional[Session] = None   # 用于 workflow5 登录（活动室工作流）
+_my_session: Optional[Session] = None    # 用于 my.fudan.edu.cn（一卡通、用电）
 
 
 def _get_booking_session() -> Session:
@@ -96,8 +101,87 @@ def _get_uis_session() -> Session:
     return _uis_session
 
 
+def _get_my_session() -> Session:
+    """获取（或重建）my.fudan.edu.cn 的 UIS session（一卡通、用电）。"""
+    global _my_session
+    from fudan_spider.uis import login as uis_login
+
+    if _my_session is not None:
+        try:
+            r = _my_session.get("https://my.fudan.edu.cn/", timeout=8, allow_redirects=False)
+            # 已登录时返回 200，未登录时会 302 到 id.fudan.edu.cn
+            if r.status_code == 200:
+                return _my_session
+        except Exception:
+            pass
+
+    _my_session = uis_login(
+        username=os.getenv("fudan_username"),
+        password=os.getenv("fudan_password"),
+        otp_secret=os.getenv("fudan_otp_secret", ""),
+        # 使用默认 service=https://my.fudan.edu.cn/
+    )
+    return _my_session
+
+
 # ── FastMCP App ────────────────────────────────────────────────────────────
 app = FastMCP("fudan-booking")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Part 0  校园卡 & 宿舍用电
+# ══════════════════════════════════════════════════════════════════════════
+
+@app.tool()
+def card_get_info() -> dict:
+    """
+    查询复旦一卡通基本信息与余额。
+
+    返回示例:
+        {
+          "balance": "128.50",
+          "status": "正常",
+          "expire": "2027-09-01",
+          "campuses": ["邯郸", "江湾"]
+        }
+    """
+    from fudan_spider.apis.card import get_card_info
+    se = _get_my_session()
+    raw = get_card_info(se)
+    # raw["data"] 是二维列表，第一行: [卡号, 姓名, 状态, 可用校区, 有效期, 余额]
+    rows = raw.get("data", [])
+    if not rows:
+        return {}
+    row = rows[0]
+    return {
+        "card_no":  row[0],
+        "name":     row[1],
+        "status":   row[2],
+        "campuses": row[3],
+        "expire":   row[4],
+        "balance":  row[5],
+    }
+
+
+@app.tool()
+def electricity_get_records(length: int = 10) -> list[dict]:
+    """
+    查询宿舍近期用电记录。
+
+    :param length: 返回记录条数，默认 10 条，最多 100 条。
+
+    返回示例:
+        [
+          {"date": "2026-04-11", "dorm": "某某楼 123", "kwh": "2.34"},
+          ...
+        ]
+    """
+    from fudan_spider.apis.electricity import get_electricity
+    se = _get_my_session()
+    raw = get_electricity(se, length=length)
+    # raw["data"] 是二维列表 [[日期, 宿舍, 用电量], ...]
+    rows = raw.get("data", [])
+    return [{"date": r[0], "dorm": r[1], "kwh": r[2]} for r in rows]
 
 
 # ══════════════════════════════════════════════════════════════════════════
