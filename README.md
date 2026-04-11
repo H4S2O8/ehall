@@ -101,13 +101,64 @@ rows = get_electricity_records(se)
 ### 体育场馆预约（`fudan_spider.apis.booking`）
 
 ```python
-from fudan_spider.apis.booking import login_booking, get_resource_list, get_available_slots
+from fudan_spider.apis.booking import (
+    login_booking, make_storage_state,
+    get_resource_list, get_available_slots,
+    get_calendar, launch_resource,
+    fill_workflow_form, cancel_reserve,
+)
 
-booking_se = login_booking(se)                              # booking 独立登录
-resources = get_resource_list(booking_se, topic_id=48)      # 场馆列表
-slots = get_available_slots(booking_se, resource_id=938)    # 空闲时段
-# slots: [{"slot_id", "resource_name", "time", "date"}, ...]
+# 登录
+se = login_booking()
+make_storage_state(se, "booking_storage.json")  # 生成 Playwright storage state
+
+# 查询场馆列表 / 空闲时段
+resources = get_resource_list(se, topic_id=48)
+slots = get_available_slots(se, resource_id=938)
+
+# 查询活动室类场馆（如 id=751 江湾生活园区学生活动中心）
+cal = get_calendar(se, resource_id=751, date="2026-04-12")
+
+# 提交预约（返回 process_url，需继续填写 workflow 表单）
+result = launch_resource(se, resource_id=759, period_id=3319, date="2026-04-12")
+
+# 填写 workflow5 表单并提交（需 Playwright）
+await fill_workflow_form(
+    process_url=result["process_url"],
+    storage_state="booking_storage.json",
+    major="081200",
+    email="xxx@m.fudan.edu.cn",
+    phone="138xxxxxxxx",
+    activity_desc="打台球",
+    application_file="/path/to/申请表.pdf",  # 可选
+)
+
+# 取消预约（需 Playwright）
+await cancel_reserve("booking_storage.json")
 ```
+
+#### 台球室全流程脚本
+
+```bash
+# 安装 Playwright 浏览器（首次）
+PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright uv run playwright install chromium
+
+# 运行全流程（预约 → 填表 → 取消）
+PYTHONPATH=. uv run python tests/debug_full_flow.py
+
+# 仅预约（不取消）
+PYTHONPATH=. uv run python tests/debug_booking_751.py
+```
+
+在 `.env` 中配置台球室预约所需的额外变量：
+
+| 变量 | 说明 |
+|------|------|
+| `fudan_phone` | 手机号 |
+| `fudan_major` | 专业代码（如 `081200`） |
+| `fudan_email` | 邮箱 |
+| `fudan_activity_desc` | 活动简介（如 `打台球`） |
+| `fudan_application_file` | 申请表扫描件路径（可选） |
 
 ## 开发计划
 
