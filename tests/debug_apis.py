@@ -9,7 +9,8 @@ from fudan_spider.uis import login
 
 se = login()
 print("[PASS] 登录成功")
-print(f"  cookies: {dict(se.cookies)}\n")
+_masked = {k: (str(v)[:4] + "***" if len(str(v)) >= 4 else "***") for k, v in dict(se.cookies).items()}
+print(f"  cookies: {_masked}\n")
 
 # 访问 my.fudan.edu.cn 首页，看是否需要二次跳转
 r = se.get("https://my.fudan.edu.cn/")
