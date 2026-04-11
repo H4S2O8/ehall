@@ -2,6 +2,8 @@
 .env
 *.env
 secrets.toml
+*_storage.json
+booking_storage.json
 
 # ── Python ────────────────────────────────────────────
 __pycache__/
