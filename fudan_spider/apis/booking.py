@@ -357,8 +357,13 @@ def launch_resource(
     r.raise_for_status()
     body = r.json()
     if body.get("e") != "OK":
-        raise RuntimeError(f"launch 失败: {body.get('m') or body}")
-    return body["d"]
+        msg = body.get("m") or str(body)
+        if "服务时间" in msg:
+            return {"ok": False, "reason": "not_in_service_time", "message": msg}
+        if "未结束的预约" in msg:
+            return {"ok": False, "reason": "existing_reservation", "message": msg}
+        raise RuntimeError(f"launch 失败: {msg}")
+    return {**body["d"], "ok": True}
 
 
 def fill_workflow_form(
@@ -573,8 +578,13 @@ def book_resource(
     r.raise_for_status()
     body = r.json()
     if body.get("e") != "OK":
-        raise RuntimeError(f"预约失败: {body.get('m') or body}")
-    return body["d"]
+        msg = body.get("m") or str(body)
+        if "服务时间" in msg:
+            return {"ok": False, "reason": "not_in_service_time", "message": msg}
+        if "未结束的预约" in msg:
+            return {"ok": False, "reason": "existing_reservation", "message": msg}
+        raise RuntimeError(f"预约失败: {msg}")
+    return {**body["d"], "ok": True}
 
 
 def cancel_reserve(

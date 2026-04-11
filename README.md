@@ -78,91 +78,177 @@ GET  https://my.fudan.edu.cn/?ticket=ST-xxx  → 完成 CAS 兑换
 service = "https://booking.fudan.edu.cn/reservation/api/login/cas"
 ```
 
-## 已实现 API
+## MCP Server
 
-### 一卡通（`fudan_spider.apis.card`）
+将场馆预约 API 封装为 MCP Tools，供 Claude Desktop / Cursor / Windsurf 等支持 MCP 协议的 AI 客户端调用。
 
-```python
-from fudan_spider.uis import login
-from fudan_spider.apis.card import get_card_info
+支持两种部署模式：
+- **本地模式（stdio）**：MCP Client 直接启动子进程，适合个人开发机使用
+- **远端模式（SSE）**：Server 部署在云服务器，MCP Client 通过 HTTP 连接，适合多设备共享
 
-se = login()
-info = get_card_info(se)
-# info["balance"]   → 余额（元）
-# info["status"]    → 状态
-# info["expire"]    → 有效期
-# info["campuses"]  → 可用校区列表
-```
+---
 
-### 宿舍用电（`fudan_spider.apis.electricity`）
+### 部署方式一：本地 stdio（单机使用）
 
-```python
-from fudan_spider.apis.electricity import get_electricity_records
+账号信息和服务进程均在本地，MCP Client 直接调起。
 
-rows = get_electricity_records(se)
-# rows: [(日期, 宿舍名称, 用电度数), ...]
-```
-
-### 体育场馆预约（`fudan_spider.apis.booking`）
-
-所有功能均为纯 requests 实现，无需浏览器依赖。
-
-```python
-from fudan_spider.uis import login
-from fudan_spider.apis.booking import (
-    login_booking,
-    get_resource_list, get_available_slots,
-    get_calendar, launch_resource,
-    fill_workflow_form, cancel_reserve,
-)
-
-# 登录
-uis_se = login()
-se = login_booking(uis_se)  # 复用 UIS session，只做一次 CAS 换取
-
-# 查询场馆列表 / 空闲时段（体育馆类，如羽毛球）
-resources = get_resource_list(se, topic_id=48)
-slots = get_available_slots(se, resource_id=938)
-
-# 查询活动室类场馆（如 id=751 江湾生活园区学生活动中心）
-cal = get_calendar(se, resource_id=751, date="2026-04-13")
-# cal["time_slots"]    → 时段列表
-# cal["sub_resources"] → 子场地列表
-# cal["availability"]  → 占用情况 {日期: {场地id: {时段id: {status, ...}}}}
-
-# 提交预约（活动室类，返回 process_id 用于后续填表）
-result = launch_resource(se, resource_id=759, period_id=3319, date="2026-04-13")
-reserve_id = result["process_id"]
-
-# 填写 workflow5 申请表并提交（纯 requests）
-fill_workflow_form(
-    uis_session=uis_se,
-    reserve_id=reserve_id,
-    major="081200",
-    email="xxx@m.fudan.edu.cn",
-    phone="138xxxxxxxx",
-    activity_desc="打台球，1人",
-    detail_info="多功能厅 2026-04-13 20:00-22:00",  # 预约信息描述
-    application_file="/path/to/申请表.pdf",           # 可选
-)
-
-# 取消预约（取消所有可取消的，或指定 appointment_id）
-cancel_reserve(se)
-cancel_reserve(se, appointment_id=800919)
-```
-
-#### 台球室全流程示例
+**1. 克隆并安装**
 
 ```bash
-uv run python tests/debug_pure_requests.py
+git clone https://github.com/H4S2O8/ehall.git
+cd ehall
+uv sync --extra mcp
+cp .env.example .env  # 填入学号、密码等（见"环境变量"一节）
 ```
 
-脚本会自动完成：登录 → 查询明日时段 → 发起预约 → 提交 workflow5 表单 → 取消预约。
+**2. 配置 Claude Desktop**
 
-## 开发计划
+配置文件：
+- macOS：`~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows：`%APPDATA%\Claude\claude_desktop_config.json`
 
-| 阶段 | 内容 | 状态 |
+```json
+{
+  "mcpServers": {
+    "fudan-booking": {
+      "command": "uv",
+      "args": ["run", "--extra", "mcp", "python", "-m", "mcp_server.server"],
+      "cwd": "/path/to/ehall"
+    }
+  }
+}
+```
+
+> 账号信息写在 `cwd` 目录下的 `.env` 文件中，无需在配置里明文填写。如果不想使用 `.env`，也可以在配置中加 `"env": { ... }` 块直接注入环境变量。
+
+**3. 配置 Cursor**
+
+在项目根目录创建 `.cursor/mcp.json`，内容同上（或使用 Cursor 设置面板的 MCP Servers 栏）。
+
+---
+
+### 部署方式二：远端 SSE（多设备共享）
+
+Server 运行在远程机器（VPS / 云服务器），本地 MCP Client 通过 HTTP 连接，账号信息只存在服务端。
+
+#### 服务端部署
+
+```bash
+# 1. 克隆并安装
+git clone https://github.com/H4S2O8/ehall.git
+cd ehall
+uv sync --extra mcp
+cp .env.example .env  # 填入账号信息
+
+# 2. 启动 SSE Server（默认监听 0.0.0.0:8000）
+uv run --extra mcp python -m mcp_server.server --transport sse
+
+# 指定端口
+uv run --extra mcp python -m mcp_server.server --transport sse --port 9000
+
+# 仅监听本地（配合 Nginx 反代时使用）
+uv run --extra mcp python -m mcp_server.server --transport sse --host 127.0.0.1 --port 8000
+```
+
+**使用 systemd 保持后台运行（Linux）**
+
+```ini
+# /etc/systemd/system/fudan-mcp.service
+[Unit]
+Description=Fudan Booking MCP Server
+After=network.target
+
+[Service]
+WorkingDirectory=/path/to/ehall
+ExecStart=uv run --extra mcp python -m mcp_server.server --transport sse --port 8000
+Restart=on-failure
+EnvironmentFile=/path/to/ehall/.env
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl enable --now fudan-mcp
+```
+
+**（可选）Nginx 反代 + HTTPS**
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name mcp.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";   # SSE 需要保持长连接
+        proxy_buffering off;
+        proxy_cache off;
+    }
+}
+```
+
+#### 客户端配置
+
+在 MCP Client 中填写 SSE endpoint URL，无需在本地部署代码或写账号信息：
+
+**Claude Desktop**
+
+```json
+{
+  "mcpServers": {
+    "fudan-booking": {
+      "type": "sse",
+      "url": "http://your-server-ip:8000/sse"
+    }
+  }
+}
+```
+
+**Cursor**（`.cursor/mcp.json`）
+
+```json
+{
+  "mcpServers": {
+    "fudan-booking": {
+      "type": "sse",
+      "url": "http://your-server-ip:8000/sse"
+    }
+  }
+}
+```
+
+> 若配置了 HTTPS，将 `http://` 替换为 `https://` 并使用对应域名。
+
+---
+
+### 可用 Tools
+
+**体育场馆（TOPIC_ID=48）**
+
+| Tool | 参数 | 说明 |
 |------|------|------|
-| **Phase 1** | UIS 登录、基础 API（一卡通、用电、场馆预约） | ✅ 完成 |
-| **Phase 2** | 移除 Playwright 依赖，改为纯 requests 实现；定时自动化任务 | ✅ 完成 |
-| **Phase 3** | MCP Server：将校园 API 暴露为 AI 工具 | 📋 待开始 |
+| `sports_list_venues` | — | 查询所有体育场馆列表，返回 id / name |
+| `sports_get_availability` | `resource_id`, `days=3` | 查询指定场馆未来 N 天空闲时段 |
+| `sports_book` | `group_id`, `sub_resource_ids`, `period_id`, `date`, `phone?`, `number?` | 预约体育场馆时段 |
+| `sports_cancel` | `reserve_id?` | 取消体育场馆预约（不传则取消最近一条） |
+
+**江湾生活园区台球室（新光华悦动馆）**
+
+| Tool | 参数 | 说明 |
+|------|------|------|
+| `billiards_get_availability` | `days=3` | 查询台球室未来 N 天空闲时段 |
+| `billiards_book` | `period_id`, `date`, `major?`, `email?`, `phone?`, `activity_desc?`, `application_file?` | 预约台球室并自动提交 workflow5 审批表单 |
+| `billiards_cancel` | `reserve_id?` | 取消台球室预约（不传则取消最近一条） |
+
+> 标 `?` 的参数可省略，省略时自动读取服务端 `.env` 中对应变量。
+
+### 返回值说明
+
+所有预约 tool 在以下情况下不抛异常，而是返回结构化结果：
+
+| `reason` | 含义 |
+|----------|------|
+| `not_in_service_time` | 当前不在系统受理时间（体育场馆受理窗口：07:00–24:00） |
+| `existing_reservation` | 已有未结束的预约，需先取消后再预约 |

@@ -18,6 +18,9 @@ mcp = [
     "mcp",
 ]
 
+[project.scripts]
+fudan-mcp = "mcp_server.server:app.run"
+
 [dependency-groups]
 dev = [
     "playwright>=1.58.0",
