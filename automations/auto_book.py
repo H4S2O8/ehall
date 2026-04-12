@@ -15,17 +15,30 @@
                        按顺序匹配第一个空闲的时段；留空则取第一个空闲时段
   BOOK_DATE_OFFSET     预约哪一天，相对于今天的偏移天数（默认 1，即明天）
   BOOK_NUMBER          预约人数（默认 1）
-  BOOK_MAX_RETRIES     失败时重试次数（默认 3）
-  BOOK_RETRY_INTERVAL  重试间隔秒数（默认 30）
 
-  # activity 模式额外需要（也可直接读 fudan_* 变量）：
+  # ── 脉冲抢占模式（Pulse Mode）────────────────────────────────────────
+  # 在预约窗口开放时刻（BOOK_OPEN_TIME）附近密集发请求，越近整点越密集。
+  # 脚本需在 BOOK_OPEN_TIME 前至少 BOOK_PULSE_BEFORE 秒启动。
+  #
+  BOOK_OPEN_TIME       预约窗口开放的时刻，格式 "HH:MM"（默认 "07:00"）
+  BOOK_PULSE_BEFORE    开放前多少秒开始发请求（默认 60）
+  BOOK_PULSE_AFTER     开放后多少秒内继续发请求（默认 60）
+  BOOK_PULSE_MAX       脉冲窗口内最多发多少次请求（默认 10）
+                       间隔按指数分布，越接近开放时刻越密集。
+  #
+  # 示例：BOOK_PULSE_BEFORE=60, BOOK_PULSE_AFTER=60, BOOK_PULSE_MAX=10
+  # 脚本在 06:59:00 前启动，在 [06:59:00, 07:01:00] 内发 10 次请求，
+  # 第 1 次在 06:59:00，最后一次在 07:01:00，间隔从 24s 逐步缩短至 2s 再扩大。
+
+  # ── activity 模式额外需要（也可直接读 fudan_* 变量）─────────────────
   # fudan_major / fudan_email / fudan_phone / fudan_activity_desc
   # fudan_application_file（可选）
 
 运行方式：
   uv run python automations/auto_book.py
 
-建议配合系统 crontab 或 CodeBuddy Automation 在每天 07:00 左右运行。
+建议在 BOOK_OPEN_TIME 前约 70 秒启动（如开放时间 07:00 则 06:58:50 启动）：
+  crontab: 58 6 * * * sleep 50 && cd /path/to/ehall && uv run python automations/auto_book.py
 """
 
 import datetime
@@ -59,8 +72,12 @@ SUB_IDS_RAW      = os.getenv("BOOK_SUB_IDS", "").strip()
 PREFER_TIMES_RAW = os.getenv("BOOK_PREFER_TIMES", "").strip()
 DATE_OFFSET      = int(os.getenv("BOOK_DATE_OFFSET", "1"))
 NUMBER           = int(os.getenv("BOOK_NUMBER", "1"))
-MAX_RETRIES      = int(os.getenv("BOOK_MAX_RETRIES", "3"))
-RETRY_INTERVAL   = int(os.getenv("BOOK_RETRY_INTERVAL", "30"))
+
+# 脉冲模式配置
+OPEN_TIME_STR  = os.getenv("BOOK_OPEN_TIME", "07:00").strip()   # 开放时刻 HH:MM
+PULSE_BEFORE   = int(os.getenv("BOOK_PULSE_BEFORE", "60"))      # 开放前多少秒开始
+PULSE_AFTER    = int(os.getenv("BOOK_PULSE_AFTER",  "60"))      # 开放后多少秒截止
+PULSE_MAX      = int(os.getenv("BOOK_PULSE_MAX",    "10"))      # 最多发多少次
 
 # 解析子场地 ID 列表（sports 模式）
 SUB_IDS: list[int] = (
@@ -258,31 +275,92 @@ def _run_activity(target_date: datetime.date) -> None:
 
 # ── 主入口 ──────────────────────────────────────────────────────────────────
 
+def _pulse_schedule(open_ts: float, before: float, after: float, n: int) -> list[float]:
+    """
+    生成 n 个绝对时间戳（秒），分布在 [open_ts - before, open_ts + after] 窗口内。
+
+    分布策略：在窗口内取 n 个点，使间隔关于开放时刻呈"指数收缩"，
+    即越靠近 open_ts 越密集，越远越稀疏。
+
+    做法：将 [-before, +after] 映射到 [-1, 1]，用 sinh 的反函数（arcsinh）
+    将均匀分布的 n 个点拉伸到中间密、两端稀的分布，再映射回时间轴。
+    """
+    import math
+    window = before + after
+    # 在 [0, 1] 上均匀取 n 个点
+    unit = [i / (n - 1) for i in range(n)] if n > 1 else [0.5]
+    # 映射到 [-before, +after]：先转到 [-1,1]，用 sinh 拉伸后再还原
+    k = 3.0  # 拉伸系数，越大越集中在中心
+    stretched = [math.sinh(k * (u * 2 - 1)) for u in unit]
+    lo, hi = stretched[0], stretched[-1]
+    # 归一化回 [-before, +after]
+    offsets = [(s - lo) / (hi - lo) * window - before for s in stretched]
+    return [open_ts + off for off in offsets]
+
+
 def main() -> None:
     if RESOURCE_ID == 0:
         log.error("请在 .env 中配置 BOOK_RESOURCE_ID")
         sys.exit(1)
 
     target_date = datetime.date.today() + datetime.timedelta(days=DATE_OFFSET)
-    log.info(
-        "开始自动预约: type=%s resource_id=%d date=%s prefer=%s",
-        VENUE_TYPE, RESOURCE_ID, target_date, PREFER_TIMES or "任意空闲时段",
-    )
-
     runner = _run_sports if VENUE_TYPE == "sports" else _run_activity
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    # 计算今天的开放时刻（Unix timestamp）
+    hh, mm = map(int, OPEN_TIME_STR.split(":"))
+    today = datetime.date.today()
+    open_dt = datetime.datetime(today.year, today.month, today.day, hh, mm, 0)
+    open_ts = open_dt.timestamp()
+
+    schedule = _pulse_schedule(open_ts, PULSE_BEFORE, PULSE_AFTER, PULSE_MAX)
+    now = time.time()
+
+    log.info(
+        "脉冲预约模式: type=%s resource_id=%d date=%s open=%s "
+        "window=[-%ds,+%ds] max=%d次",
+        VENUE_TYPE, RESOURCE_ID, target_date, OPEN_TIME_STR,
+        PULSE_BEFORE, PULSE_AFTER, PULSE_MAX,
+    )
+    log.info(
+        "脉冲时刻: %s",
+        [datetime.datetime.fromtimestamp(t).strftime("%H:%M:%S") for t in schedule],
+    )
+
+    # 跳过已过期的时间点
+    schedule = [t for t in schedule if t >= now]
+    if not schedule:
+        log.warning("所有脉冲时刻均已过期，立即执行一次")
+        schedule = [now]
+
+    for idx, fire_ts in enumerate(schedule, 1):
+        wait = fire_ts - time.time()
+        if wait > 0:
+            log.info("等待 %.1f 秒后发起第 %d/%d 次请求 ...", wait, idx, len(schedule))
+            time.sleep(wait)
+
+        log.info("── 第 %d/%d 次尝试 ──", idx, len(schedule))
         try:
             runner(target_date)
-            break
+            log.info("预约成功，退出脉冲循环")
+            return                      # 成功即退出
         except Exception as e:
-            log.error("第 %d/%d 次尝试失败: %s", attempt, MAX_RETRIES, e, exc_info=True)
-            if attempt < MAX_RETRIES:
-                log.info("等待 %d 秒后重试 ...", RETRY_INTERVAL)
-                time.sleep(RETRY_INTERVAL)
+            msg = str(e)
+            # "未到服务时间"：不报错，等下一个脉冲
+            if "服务时间" in msg or "not_in_service_time" in msg:
+                log.info("服务尚未开放: %s", msg)
+            # "已有未结束预约"：说明已经抢到过，直接退出
+            elif "未结束的预约" in msg or "existing_reservation" in msg:
+                log.info("已存在预约，无需重复预约，退出")
+                _notify("已存在有效预约，跳过本次自动预约")
+                return
             else:
-                _notify(f"自动预约彻底失败: {e}")
-                sys.exit(1)
+                log.error("第 %d 次失败: %s", idx, msg, exc_info=True)
+
+    # 所有脉冲均未成功
+    fail_msg = f"脉冲窗口内 {len(schedule)} 次尝试均未成功预约"
+    log.error(fail_msg)
+    _notify(fail_msg)
+    sys.exit(1)
 
 
 if __name__ == "__main__":

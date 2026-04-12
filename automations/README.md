@@ -6,7 +6,7 @@
 
 ## auto_book.py — 自动预约场馆
 
-在指定时间（建议每天 07:00）自动查询明天目标场馆的空闲时段并提交预约。
+在预约窗口开放时刻（默认 07:00）前后密集发起请求，越接近开放时刻越密集，抢到即退出。
 
 ### 配置（写入项目根目录的 `.env`）
 
@@ -18,8 +18,20 @@
 | `BOOK_PREFER_TIMES` | 期望时段，逗号分隔，如 `18:00-20:00,20:00-22:00` | 任意空闲 |
 | `BOOK_DATE_OFFSET` | 预约哪天，相对今天的偏移天数 | `1`（明天） |
 | `BOOK_NUMBER` | 预约人数 | `1` |
-| `BOOK_MAX_RETRIES` | 失败重试次数 | `3` |
-| `BOOK_RETRY_INTERVAL` | 重试间隔（秒） | `30` |
+| `BOOK_OPEN_TIME` | 预约窗口开放时刻（`HH:MM`） | `07:00` |
+| `BOOK_PULSE_BEFORE` | 开放前多少秒开始发请求 | `60` |
+| `BOOK_PULSE_AFTER` | 开放后多少秒内继续发请求 | `60` |
+| `BOOK_PULSE_MAX` | 脉冲窗口内最多发多少次请求 | `10` |
+
+**脉冲分布说明**：请求时刻采用 sinh 拉伸分布，中间密集、两端稀疏。例如默认 10 次、前后各 60s：
+
+```
+-60s  -30s  -15s  -7s  -2s | +2s  +7s  +15s  +30s  +60s
+ ←── 稀疏 ────────────────── 密集 ──────────────── 稀疏 ──→
+                           ↑ 开放时刻
+```
+
+成功后立即退出，不再继续发请求。若服务尚未开放（返回"服务时间"错误）则静默等待下一个脉冲。
 
 `activity` 模式还会读取 `fudan_major`、`fudan_email`、`fudan_phone`、`fudan_activity_desc`、`fudan_application_file`（均已在根目录 `.env.example` 中说明）。
 
@@ -44,9 +56,11 @@ uv run python automations/auto_book.py
 
 ### 定时运行（crontab）
 
+脚本需在开放时刻前 `BOOK_PULSE_BEFORE` 秒之前启动。默认配置（前 60s）建议在 06:58 启动：
+
 ```crontab
-# 每天 07:00 整点运行（根据服务器开放时间自行调整）
-0 7 * * * cd /path/to/ehall && uv run python automations/auto_book.py >> /tmp/auto_book.log 2>&1
+# 06:58:30 启动，覆盖 [06:59:00, 07:01:00] 脉冲窗口
+58 6 * * * sleep 30 && cd /path/to/ehall && uv run python automations/auto_book.py >> /tmp/auto_book.log 2>&1
 ```
 
 ### 定时运行（CodeBuddy Automation）
@@ -58,7 +72,9 @@ Run: uv run python automations/auto_book.py
 Working directory: /path/to/ehall
 ```
 
-Schedule: `FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;BYHOUR=7;BYMINUTE=5`
+Schedule: `FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;BYHOUR=6;BYMINUTE=58`
+
+> 注意：CodeBuddy Automation 不支持秒级精度，建议在脚本里适当调小 `BOOK_PULSE_BEFORE`（如 50s）以与启动时间匹配。
 
 ### 通知
 
