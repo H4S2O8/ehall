@@ -536,50 +536,76 @@ def billiards_cancel(reserve_id: Optional[int] = None) -> str:
 @app.tool()
 def schedule_book(
     venue_name: str,
-    fire_datetime: str,
+    book_date: str,
     prefer_times: str = "",
-    date_offset: int = 1,
+    open_time: str = "07:00",
+    pulse_before: int = 60,
+    pulse_after: int = 60,
+    pulse_max: int = 10,
 ) -> dict:
     """
-    在指定时刻（fire_datetime）一次性运行 auto_book.py 预约场馆，
-    任务执行完后自动从 crontab 删除，不会重复触发。
+    在预约窗口开放前写入 crontab，用脉冲算法抢占预约，成功后自动删除 crontab 条目。
 
     :param venue_name:    场馆名称，须在 automations/venues.py 列表中，
                           如 "江湾综合体育馆-网球"、"南区网球场-网球"。
-    :param fire_datetime: 触发时刻，格式 "YYYY-MM-DD HH:MM"，
-                          建议设为预约开放时间前 60 秒，如 "2026-04-13 06:59"。
+    :param book_date:     要预约的日期，格式 "YYYY-MM-DD"（即你想去的那天）。
     :param prefer_times:  期望时段，逗号分隔，如 "18:00-20:00,20:00-22:00"。
                           留空则自动选第一个空闲时段。
-    :param date_offset:   预约哪天，相对 fire_datetime 当天的偏移天数，默认 1（即明天）。
+    :param open_time:     预约窗口开放时刻，格式 "HH:MM"，默认 "07:00"。
+    :param pulse_before:  开放前多少秒开始发请求，默认 60。
+    :param pulse_after:   开放后多少秒内继续发请求，默认 60。
+    :param pulse_max:     脉冲窗口内最多发多少次请求，默认 10，成功即退出。
 
     返回:
         {
-          "crontab_entry": "59 6 13 4 * ...",  # 写入的 cron 行
+          "crontab_entry": "59 6 13 4 * ...",
           "fire_at": "2026-04-13 06:59",
+          "book_date": "2026-04-14",
           "venue_name": "江湾综合体育馆-网球",
-          "prefer_times": "18:00-20:00"
+          "prefer_times": "18:00-20:00,20:00-22:00"
         }
     """
     import shlex
     import subprocess
     import tempfile
 
-    # 解析触发时刻
+    # 解析预约日期
     try:
-        fire_dt = datetime.datetime.strptime(fire_datetime, "%Y-%m-%d %H:%M")
+        book_dt = datetime.date.fromisoformat(book_date)
     except ValueError:
-        raise ValueError(f"fire_datetime 格式错误，应为 'YYYY-MM-DD HH:MM'，收到: {fire_datetime!r}")
+        raise ValueError(f"book_date 格式错误，应为 'YYYY-MM-DD'，收到: {book_date!r}")
+
+    # 解析开放时刻
+    try:
+        hh, mm = map(int, open_time.split(":"))
+    except ValueError:
+        raise ValueError(f"open_time 格式错误，应为 'HH:MM'，收到: {open_time!r}")
+
+    # crontab 触发时间 = book_date 前一天（预约明天，今晚/明早抢占）的开放时刻 - pulse_before 秒
+    # 即：在 book_date 的前一天，open_time 前 pulse_before 秒启动脚本
+    fire_base = datetime.datetime(book_dt.year, book_dt.month, book_dt.day, hh, mm, 0)
+    fire_base -= datetime.timedelta(days=1)          # 提前一天（预约当天的前一天）
+    fire_dt   = fire_base - datetime.timedelta(seconds=pulse_before)
+
+    # date_offset：脚本运行当天到 book_date 的天数差
+    run_date  = fire_dt.date()
+    date_offset = (book_dt - run_date).days
 
     # 找项目根目录（server.py 在 mcp_server/，根目录是上一层）
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     uv_bin = "uv"  # 假设 uv 在 PATH；若不在可改为绝对路径
 
-    # 构造环境变量覆盖
-    env_overrides = f"BOOK_VENUE_NAME={shlex.quote(venue_name)}"
+    # 构造环境变量覆盖（含脉冲参数）
+    env_parts = [f"BOOK_VENUE_NAME={shlex.quote(venue_name)}"]
     if prefer_times:
-        env_overrides += f" BOOK_PREFER_TIMES={shlex.quote(prefer_times)}"
+        env_parts.append(f"BOOK_PREFER_TIMES={shlex.quote(prefer_times)}")
     if date_offset != 1:
-        env_overrides += f" BOOK_DATE_OFFSET={date_offset}"
+        env_parts.append(f"BOOK_DATE_OFFSET={date_offset}")
+    env_parts.append(f"BOOK_OPEN_TIME={shlex.quote(open_time)}")
+    env_parts.append(f"BOOK_PULSE_BEFORE={pulse_before}")
+    env_parts.append(f"BOOK_PULSE_AFTER={pulse_after}")
+    env_parts.append(f"BOOK_PULSE_MAX={pulse_max}")
+    env_overrides = " ".join(env_parts)
 
     # 标记字符串，用于事后删除自身
     tag = f"# ehall-once:{venue_name}"
@@ -587,7 +613,7 @@ def schedule_book(
     # cron 格式：分 时 日 月 *
     cron_time = f"{fire_dt.minute} {fire_dt.hour} {fire_dt.day} {fire_dt.month} *"
 
-    # 完整 cron 行：执行完后用 crontab -l | grep -v tag | crontab - 删除自身
+    # 完整 cron 行：执行完后自动删除自身
     cmd = (
         f"cd {shlex.quote(project_root)} && "
         f"{env_overrides} {uv_bin} run python automations/auto_book.py "
@@ -597,8 +623,8 @@ def schedule_book(
     cron_line = f"{cron_time} {cmd} {tag}"
 
     # 读取现有 crontab，追加新行，写回
-    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-    existing = result.stdout if result.returncode == 0 else ""
+    proc = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    existing = proc.stdout if proc.returncode == 0 else ""
 
     # 去掉同场馆的旧任务（避免重复）
     lines = [l for l in existing.splitlines() if tag not in l]
@@ -615,8 +641,11 @@ def schedule_book(
     return {
         "crontab_entry": cron_line,
         "fire_at": fire_dt.strftime("%Y-%m-%d %H:%M"),
+        "book_date": book_date,
         "venue_name": venue_name,
         "prefer_times": prefer_times,
+        "open_time": open_time,
+        "pulse_window": f"-{pulse_before}s ~ +{pulse_after}s，最多 {pulse_max} 次",
     }
 
 
