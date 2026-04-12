@@ -45,8 +45,8 @@ uv run python automations/auto_book.py
 ### 定时运行（crontab）
 
 ```crontab
-# 每天 07:05 运行，提前 5 分钟等待服务器开放
-5 7 * * * cd /path/to/ehall && uv run python automations/auto_book.py >> /tmp/auto_book.log 2>&1
+# 每天 07:00 整点运行（根据服务器开放时间自行调整）
+0 7 * * * cd /path/to/ehall && uv run python automations/auto_book.py >> /tmp/auto_book.log 2>&1
 ```
 
 ### 定时运行（CodeBuddy Automation）
