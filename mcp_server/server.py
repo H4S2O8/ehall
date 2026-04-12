@@ -585,9 +585,10 @@ def schedule_book(
     # 即：在 book_date 的前一天，open_time 前 pulse_before 秒启动脚本
     fire_base = datetime.datetime(book_dt.year, book_dt.month, book_dt.day, hh, mm, 0)
     fire_base -= datetime.timedelta(days=1)          # 提前一天（预约当天的前一天）
-    # crontab 精度只到分钟，向下取整到整分，再减 pulse_before 秒（向上取整到分）
-    pulse_before_min = (pulse_before + 59) // 60    # 秒转分，向上取整
-    fire_dt = fire_base.replace(second=0, microsecond=0) - datetime.timedelta(minutes=pulse_before_min)
+    # crontab 触发时间 = 脉冲窗口最前端（open_time - pulse_before） 再提前 1 分钟
+    # 那 1 分钟留给脚本启动 + 登录耗时，确保进入脉冲循环前已就绪
+    pulse_window_start = fire_base - datetime.timedelta(seconds=pulse_before)
+    fire_dt = (pulse_window_start - datetime.timedelta(minutes=1)).replace(second=0, microsecond=0)
 
     # date_offset：脚本运行当天到 book_date 的天数差
     run_date  = fire_dt.date()
