@@ -41,10 +41,9 @@ class VenueInfo:
 VENUES: dict[str, VenueInfo] = {
 
     # ── 体育场馆（sports）──────────────────────────────────────────────────
-    "羽毛球-本部":      VenueInfo("sports", 1119, [],          "邯郸校区羽毛球馆"),
-    "羽毛球-江湾":      VenueInfo("sports", 1120, [],          "江湾校区羽毛球馆"),
-    "乒乓球-本部":      VenueInfo("sports", 1121, [],          "邯郸校区乒乓球室"),
-    "乒乓球-江湾":      VenueInfo("sports", 1122, [],          "江湾校区乒乓球室"),
+    "羽毛球-本部":      VenueInfo("sports", 938,  [],          "北区体育馆-羽毛球（邯郸）"),
+    "乒乓球-本部":      VenueInfo("sports", 977,  [],          "北区体育馆-乒乓球（邯郸）"),
+    "乒乓球-江湾":      VenueInfo("sports", 1119, list(range(1120, 1132)), "江湾综合体育馆-乒乓球（12张台）"),
     "篮球-本部":        VenueInfo("sports", 1123, [],          "邯郸校区篮球场"),
     "篮球-江湾":        VenueInfo("sports", 1124, [],          "江湾校区篮球场"),
     "网球-本部":        VenueInfo("sports", 1125, [],          "邯郸校区网球场"),
@@ -60,12 +59,13 @@ VENUES: dict[str, VenueInfo] = {
     "研讨室-江湾":      VenueInfo("activity", 801, [],         "江湾校区研讨室"),
 
     # ── 英文别名（方便命令行使用）─────────────────────────────────────────
-    "badminton":        VenueInfo("sports",   1119, [],        "邯郸校区羽毛球馆（英文别名）"),
-    "pingpong":         VenueInfo("sports",   1121, [],        "邯郸校区乒乓球室（英文别名）"),
-    "basketball":       VenueInfo("sports",   1123, [],        "邯郸校区篮球场（英文别名）"),
-    "tennis":           VenueInfo("sports",   1125, [],        "邯郸校区网球场（英文别名）"),
-    "swimming":         VenueInfo("sports",   1127, [],        "邯郸校区游泳池（英文别名）"),
-    "billiards":        VenueInfo("activity",  751, [],        "台球室（英文别名）"),
+    "badminton":        VenueInfo("sports",   938,  [],                   "北区体育馆-羽毛球（英文别名）"),
+    "pingpong":         VenueInfo("sports",   977,  [],                   "北区体育馆-乒乓球（英文别名）"),
+    "pingpong-jiwan":   VenueInfo("sports",   1119, list(range(1120,1132)),"江湾乒乓球（英文别名）"),
+    "basketball":       VenueInfo("sports",   1123, [],                   "邯郸校区篮球场（英文别名）"),
+    "tennis":           VenueInfo("sports",   1125, [],                   "邯郸校区网球场（英文别名）"),
+    "swimming":         VenueInfo("sports",   1127, [],                   "邯郸校区游泳池（英文别名）"),
+    "billiards":        VenueInfo("activity",  751, [],                   "台球室（英文别名）"),
 }
 
 # 额外支持的中文模糊别名映射到规范键
