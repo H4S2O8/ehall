@@ -128,7 +128,7 @@ def get_resource_list(se: Session, topic_id: int = TOPIC_ID) -> list[dict]:
     """
     r = se.get(
         f"{BOOKING_BASE}/reservation/api/topic/resource-list",
-        params={"id": topic_id},
+        params={"id": topic_id, "pageSize": 200},
     )
     r.raise_for_status()
     body = r.json()

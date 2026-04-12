@@ -1,7 +1,7 @@
 """
 复旦大学预约系统已知场馆字典
 ==============================
-数据来源：booking.fudan.edu.cn 实测整理。
+数据来源：booking.fudan.edu.cn topic/resource-list?id=48&pageSize=200 实测整理。
 
 每条记录格式：
   "场馆别名": VenueInfo(
@@ -16,13 +16,14 @@
   BOOK_VENUE_TYPE / BOOK_RESOURCE_ID / BOOK_SUB_IDS，
   无需手动查询 ID。
 
+  运行 `uv run python automations/venues.py` 查看完整列表。
   你也可以同时配置 BOOK_RESOURCE_ID 来覆盖字典中的值。
 
 更新方式（手动查询后填入）：
   from fudan_spider.apis.booking import login_booking, get_resource_list
   se = login_booking()
   for r in get_resource_list(se):
-      print(r["id"], r["name"], r.get("sub_resources", []))
+      print(r["id"], r["name"])
 """
 
 from dataclasses import dataclass, field
@@ -37,45 +38,61 @@ class VenueInfo:
 
 
 # ── 已知场馆字典 ─────────────────────────────────────────────────────────────
-# 键名不区分大小写（查询时统一 lower()），可用中文或英文别名。
+# 键名即 BOOK_VENUE_NAME 可填写的值，查询时不区分大小写。
 VENUES: dict[str, VenueInfo] = {
 
-    # ── 体育场馆（sports）──────────────────────────────────────────────────
-    "羽毛球-本部":      VenueInfo("sports", 938,  [],          "北区体育馆-羽毛球（邯郸）"),
-    "乒乓球-本部":      VenueInfo("sports", 977,  [],          "北区体育馆-乒乓球（邯郸）"),
-    "乒乓球-江湾":      VenueInfo("sports", 1119, list(range(1120, 1132)), "江湾综合体育馆-乒乓球（12张台）"),
-    "篮球-本部":        VenueInfo("sports", 1123, [],          "邯郸校区篮球场"),
-    "篮球-江湾":        VenueInfo("sports", 1124, [],          "江湾校区篮球场"),
-    "网球-本部":        VenueInfo("sports", 1125, [],          "邯郸校区网球场"),
-    "网球-江湾":        VenueInfo("sports", 1126, [],          "江湾校区网球场"),
-    "游泳-本部":        VenueInfo("sports", 1127, [],          "邯郸校区游泳池"),
-    "游泳-江湾":        VenueInfo("sports", 1128, [],          "江湾校区游泳池"),
-    "健身房-本部":      VenueInfo("sports", 1129, [],          "邯郸校区健身房"),
-    "健身房-江湾":      VenueInfo("sports", 1130, [],          "江湾校区健身房"),
+    # ── 邯郸（本部）北区体育馆 ─────────────────────────────────────────────
+    "北区体育馆-羽毛球":       VenueInfo("sports",  938,  [], "邯郸校区北区体育馆"),
+    "北区体育馆-篮球":         VenueInfo("sports",  925,  [], "邯郸校区北区体育馆"),
+    "北区体育馆-排球":         VenueInfo("sports",  964,  [], "邯郸校区北区体育馆"),
+    "北区体育馆-乒乓球":       VenueInfo("sports",  977,  [], "邯郸校区北区体育馆"),
+    "北区体育馆-舞蹈房":       VenueInfo("sports",  990,  [], "邯郸校区北区体育馆"),
 
-    # ── 活动室（activity）─────────────────────────────────────────────────
-    "台球室":           VenueInfo("activity", 751, [],         "台球室（workflow5 审批）"),
-    "研讨室-本部":      VenueInfo("activity", 800, [],         "邯郸校区研讨室"),
-    "研讨室-江湾":      VenueInfo("activity", 801, [],         "江湾校区研讨室"),
+    # ── 邯郸（本部）正大体育馆 ────────────────────────────────────────────
+    "正大体育馆-羽毛球":       VenueInfo("sports",  951,  [], "邯郸校区正大体育馆"),
 
-    # ── 英文别名（方便命令行使用）─────────────────────────────────────────
-    "badminton":        VenueInfo("sports",   938,  [],                   "北区体育馆-羽毛球（英文别名）"),
-    "pingpong":         VenueInfo("sports",   977,  [],                   "北区体育馆-乒乓球（英文别名）"),
-    "pingpong-jiwan":   VenueInfo("sports",   1119, list(range(1120,1132)),"江湾乒乓球（英文别名）"),
-    "basketball":       VenueInfo("sports",   1123, [],                   "邯郸校区篮球场（英文别名）"),
-    "tennis":           VenueInfo("sports",   1125, [],                   "邯郸校区网球场（英文别名）"),
-    "swimming":         VenueInfo("sports",   1127, [],                   "邯郸校区游泳池（英文别名）"),
-    "billiards":        VenueInfo("activity",  751, [],                   "台球室（英文别名）"),
+    # ── 邯郸（本部）室外 ──────────────────────────────────────────────────
+    "本北高速室外网球场-网球":  VenueInfo("sports", 1349, [], "邯郸校区本北高速旁室外网球场"),
+    "南区网球场-网球":         VenueInfo("sports", 1003, [], "邯郸校区南区网球场"),
+    "南区乒乓房-乒乓球":       VenueInfo("sports", 1016, [], "邯郸校区南区乒乓球室"),
+    "国权路运动场-网球":       VenueInfo("sports", 1042, [], "邯郸校区国权路运动场"),
+    "国福路田径场-足球场":     VenueInfo("sports", 1029, [], "邯郸校区国福路田径场"),
+
+    # ── 江湾校区 ──────────────────────────────────────────────────────────
+    "江湾综合体育馆-羽毛球":   VenueInfo("sports", 1055, [], "江湾校区综合体育馆"),
+    "江湾综合体育馆-篮球":     VenueInfo("sports", 1087, [], "江湾校区综合体育馆"),
+    "江湾综合体育馆-排球":     VenueInfo("sports", 1103, [], "江湾校区综合体育馆"),
+    "江湾综合体育馆-乒乓球":   VenueInfo("sports", 1119, list(range(1120, 1132)), "江湾校区综合体育馆（12张台）"),
+    "江湾综合体育馆-网球":     VenueInfo("sports", 1071, [], "江湾校区综合体育馆"),
+    "江湾综合体育馆-舞蹈房":   VenueInfo("sports", 1293, [], "江湾校区综合体育馆"),
+    "江湾室外体育场-网球":     VenueInfo("sports", 1135, [], "江湾校区室外体育场"),
+    "江湾室外体育场-足球场":   VenueInfo("sports", 1309, [], "江湾校区室外体育场"),
+
+    # ── 枫林校区 ──────────────────────────────────────────────────────────
+    "枫林综合体育馆-篮球":     VenueInfo("sports", 1153, [], "枫林校区综合体育馆"),
+    "枫林学生活动中心-羽毛球": VenueInfo("sports", 1169, [], "枫林校区学生活动中心"),
+    "枫林学生活动中心-乒乓球": VenueInfo("sports", 1185, [], "枫林校区学生活动中心"),
+
+    # ── 张江校区 ──────────────────────────────────────────────────────────
+    "张江学生活动中心-羽毛球": VenueInfo("sports", 1201, [], "张江校区学生活动中心"),
+    "张江学生活动中心-网球":   VenueInfo("sports", 1217, [], "张江校区学生活动中心"),
+    "张江学生活动中心-乒乓球": VenueInfo("sports", 1233, [], "张江校区学生活动中心"),
+
+    # ── 活动室（activity，需 workflow5 审批）─────────────────────────────
+    "台球室":           VenueInfo("activity",  751, [], "江湾生活园区台球室"),
+    "研讨室-本部":      VenueInfo("activity",  800, [], "邯郸校区研讨室"),
+    "研讨室-江湾":      VenueInfo("activity",  801, [], "江湾校区研讨室"),
 }
 
-# 额外支持的中文模糊别名映射到规范键
+# 中文模糊别名 → 规范键（当用户只填"羽毛球"时默认到邯郸北区）
 _ALIAS: dict[str, str] = {
-    "羽毛球":   "羽毛球-本部",
-    "乒乓球":   "乒乓球-本部",
-    "篮球":     "篮球-本部",
-    "网球":     "网球-本部",
-    "游泳":     "游泳-本部",
-    "健身房":   "健身房-本部",
+    "羽毛球":   "北区体育馆-羽毛球",
+    "乒乓球":   "北区体育馆-乒乓球",
+    "篮球":     "北区体育馆-篮球",
+    "排球":     "北区体育馆-排球",
+    "舞蹈房":   "北区体育馆-舞蹈房",
+    "网球":     "南区网球场-网球",
+    "足球":     "江湾室外体育场-足球场",
     "台球":     "台球室",
     "研讨室":   "研讨室-本部",
 }
@@ -90,11 +107,9 @@ def lookup(name: str) -> VenueInfo | None:
     if key in VENUES:
         return VENUES[key]
     lower = key.lower()
-    # 大小写不敏感查 VENUES
     for k, v in VENUES.items():
         if k.lower() == lower:
             return v
-    # 模糊别名
     canonical = _ALIAS.get(key) or _ALIAS.get(lower)
     if canonical:
         return VENUES.get(canonical)
@@ -103,10 +118,10 @@ def lookup(name: str) -> VenueInfo | None:
 
 def list_venues() -> None:
     """打印所有已知场馆，方便用户选择。"""
-    print(f"{'别名':<20} {'类型':<10} {'resource_id':<14} 说明")
-    print("-" * 65)
+    print(f"{'别名':<24} {'类型':<10} {'resource_id':<14} 说明")
+    print("-" * 70)
     for name, info in VENUES.items():
-        print(f"{name:<20} {info.venue_type:<10} {info.resource_id:<14} {info.description}")
+        print(f"{name:<24} {info.venue_type:<10} {info.resource_id:<14} {info.description}")
 
 
 if __name__ == "__main__":
