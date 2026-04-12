@@ -609,7 +609,11 @@ def schedule_book(
 
     # 找项目根目录（server.py 在 mcp_server/，根目录是上一层）
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    uv_bin = "uv"  # 假设 uv 在 PATH；若不在可改为绝对路径
+    # uv 绝对路径：cron 环境 PATH 极简，必须用绝对路径
+    uv_bin = shlex.quote(
+        subprocess.run(["which", "uv"], capture_output=True, text=True).stdout.strip()
+        or "uv"
+    )
 
     # 构造环境变量覆盖（含脉冲参数）
     env_parts = [f"BOOK_VENUE_NAME={shlex.quote(venue_name)}"]
