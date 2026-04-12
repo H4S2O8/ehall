@@ -542,19 +542,25 @@ def schedule_book(
     pulse_before: int = 120,
     pulse_after: int = 60,
     pulse_max: int = 10,
+    sub_ids: str = "",
+    override_fire_time: str = "",
 ) -> dict:
     """
     在预约窗口开放前写入 crontab，用脉冲算法抢占预约，成功后自动删除 crontab 条目。
 
-    :param venue_name:    场馆名称，须在 automations/venues.py 列表中，
-                          如 "江湾综合体育馆-网球"、"南区网球场-网球"。
-    :param book_date:     要预约的日期，格式 "YYYY-MM-DD"（即你想去的那天）。
-    :param prefer_times:  期望时段，逗号分隔，如 "18:00-20:00,20:00-22:00"。
-                          留空则自动选第一个空闲时段。
-    :param open_time:     预约窗口开放时刻，格式 "HH:MM"，默认 "07:00"。
-    :param pulse_before:  开放前多少秒开始发请求，默认 120（脚本在开放前 2 分钟启动，后台等待）。
-    :param pulse_after:   开放后多少秒内继续发请求，默认 60。
-    :param pulse_max:     脉冲窗口内最多发多少次请求，默认 10，成功即退出。
+    :param venue_name:         场馆名称，须在 automations/venues.py 列表中，
+                               如 "江湾综合体育馆-网球"、"南区网球场-网球"。
+    :param book_date:          要预约的日期，格式 "YYYY-MM-DD"（即你想去的那天）。
+    :param prefer_times:       期望时段，逗号分隔，如 "18:00-20:00,20:00-22:00"。
+                               留空则自动选第一个空闲时段。
+    :param open_time:          预约窗口开放时刻，格式 "HH:MM"，默认 "07:00"。
+    :param pulse_before:       开放前多少秒开始发请求，默认 120。
+    :param pulse_after:        开放后多少秒内继续发请求，默认 60。
+    :param pulse_max:          脉冲窗口内最多发多少次请求，默认 10，成功即退出。
+    :param sub_ids:            指定子场地 ID，逗号分隔，如 "1131" 表示12号场地。
+                               留空则由 venues.py 配置或自动选择。
+    :param override_fire_time: 直接指定 crontab 触发时间，格式 "HH:MM"（今天日期）。
+                               用于测试场景，绕过自动计算。留空则正常推算。
 
     返回:
         {
@@ -581,18 +587,25 @@ def schedule_book(
     except ValueError:
         raise ValueError(f"open_time 格式错误，应为 'HH:MM'，收到: {open_time!r}")
 
-    # crontab 触发时间 = book_date 前一天（预约明天，今晚/明早抢占）的开放时刻 - pulse_before 秒
-    # 即：在 book_date 的前一天，open_time 前 pulse_before 秒启动脚本
-    fire_base = datetime.datetime(book_dt.year, book_dt.month, book_dt.day, hh, mm, 0)
-    fire_base -= datetime.timedelta(days=1)          # 提前一天（预约当天的前一天）
-    # crontab 触发时间 = 脉冲窗口最前端（open_time - pulse_before） 再提前 1 分钟
-    # 那 1 分钟留给脚本启动 + 登录耗时，确保进入脉冲循环前已就绪
-    pulse_window_start = fire_base - datetime.timedelta(seconds=pulse_before)
-    fire_dt = (pulse_window_start - datetime.timedelta(minutes=1)).replace(second=0, microsecond=0)
-
-    # date_offset：脚本运行当天到 book_date 的天数差
-    run_date  = fire_dt.date()
-    date_offset = (book_dt - run_date).days
+    # crontab 触发时间
+    if override_fire_time:
+        # 测试模式：直接指定今天的触发时刻
+        try:
+            ft_hh, ft_mm = map(int, override_fire_time.split(":"))
+        except ValueError:
+            raise ValueError(f"override_fire_time 格式错误，应为 'HH:MM'，收到: {override_fire_time!r}")
+        today = datetime.date.today()
+        fire_dt = datetime.datetime(today.year, today.month, today.day, ft_hh, ft_mm, 0)
+        run_date = fire_dt.date()
+        date_offset = (book_dt - run_date).days
+    else:
+        # 正常模式：book_date 前一天的 open_time 前 pulse_before+60s
+        fire_base = datetime.datetime(book_dt.year, book_dt.month, book_dt.day, hh, mm, 0)
+        fire_base -= datetime.timedelta(days=1)
+        pulse_window_start = fire_base - datetime.timedelta(seconds=pulse_before)
+        fire_dt = (pulse_window_start - datetime.timedelta(minutes=1)).replace(second=0, microsecond=0)
+        run_date  = fire_dt.date()
+        date_offset = (book_dt - run_date).days
 
     # 找项目根目录（server.py 在 mcp_server/，根目录是上一层）
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -602,6 +615,8 @@ def schedule_book(
     env_parts = [f"BOOK_VENUE_NAME={shlex.quote(venue_name)}"]
     if prefer_times:
         env_parts.append(f"BOOK_PREFER_TIMES={shlex.quote(prefer_times)}")
+    if sub_ids:
+        env_parts.append(f"BOOK_SUB_IDS={shlex.quote(sub_ids)}")
     if date_offset != 1:
         env_parts.append(f"BOOK_DATE_OFFSET={date_offset}")
     env_parts.append(f"BOOK_OPEN_TIME={shlex.quote(open_time)}")
