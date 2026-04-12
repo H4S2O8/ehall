@@ -616,12 +616,23 @@ def schedule_book(
     # cron 格式：分 时 日 月 *
     cron_time = f"{fire_dt.minute} {fire_dt.hour} {fire_dt.day} {fire_dt.month} *"
 
+    # 自删命令：用绝对路径调用 crontab，避免 cron 环境 PATH 不全
+    crontab_bin = shlex.quote(
+        subprocess.run(["which", "crontab"], capture_output=True, text=True).stdout.strip()
+        or "/usr/bin/crontab"
+    )
+    self_remove = (
+        f"{crontab_bin} -l 2>/dev/null "
+        f"| grep -v {shlex.quote(tag)} "
+        f"| {crontab_bin} -"
+    )
+
     # 完整 cron 行：执行完后自动删除自身
     cmd = (
         f"cd {shlex.quote(project_root)} && "
         f"{env_overrides} {uv_bin} run python automations/auto_book.py "
         f">> /tmp/auto_book.log 2>&1 ; "
-        f"crontab -l 2>/dev/null | grep -v {shlex.quote(tag)} | crontab -"
+        f"{self_remove}"
     )
     cron_line = f"{cron_time} {cmd} {tag}"
 
