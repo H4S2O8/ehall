@@ -44,7 +44,6 @@ uv run python automations/venues.py
 | `BOOK_SUB_IDS` | 子场地 ID 列表，逗号分隔（留空则自动选） | 空 |
 | `BOOK_PREFER_TIMES` | 期望时段，逗号分隔，如 `18:00-20:00,20:00-22:00` | 任意空闲 |
 | `BOOK_DATE_OFFSET` | 预约哪天，相对今天的偏移天数 | `1`（明天） |
-| `BOOK_NUMBER` | 预约人数 | `1` |
 | `BOOK_OPEN_TIME` | 预约窗口开放时刻（`HH:MM`） | `07:00` |
 | `BOOK_PULSE_BEFORE` | 开放前多少秒开始发请求 | `60` |
 | `BOOK_PULSE_AFTER` | 开放后多少秒内继续发请求 | `60` |

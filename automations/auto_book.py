@@ -24,7 +24,6 @@
   BOOK_PREFER_TIMES    期望时段列表，英文逗号分隔，格式如 "18:00-20:00,20:00-22:00"
                        按顺序匹配第一个空闲的时段；留空则取第一个空闲时段
   BOOK_DATE_OFFSET     预约哪一天，相对于今天的偏移天数（默认 1，即明天）
-  BOOK_NUMBER          预约人数（默认 1）
 
   # ── 脉冲抢占模式（Pulse Mode）────────────────────────────────────────
   # 在预约窗口开放时刻（BOOK_OPEN_TIME）附近密集发请求，越近整点越密集。
@@ -109,7 +108,6 @@ SUB_IDS: list[int] = (
 
 PREFER_TIMES_RAW = os.getenv("BOOK_PREFER_TIMES", "").strip()
 DATE_OFFSET      = int(os.getenv("BOOK_DATE_OFFSET", "1"))
-NUMBER           = int(os.getenv("BOOK_NUMBER", "1"))
 
 # 脉冲模式配置
 OPEN_TIME_STR  = os.getenv("BOOK_OPEN_TIME", "07:00").strip()   # 开放时刻 HH:MM
@@ -191,7 +189,6 @@ def _run_sports(target_date: datetime.date) -> None:
         period_id        = slot["time_id"],
         date             = target_date,
         phone            = phone,
-        number           = NUMBER,
     )
 
     if not result.get("ok"):
@@ -262,7 +259,6 @@ def _run_activity(target_date: datetime.date) -> None:
         resource_id = slot["sub_resource_id"],
         period_id   = slot["time_id"],
         date        = target_date,
-        number      = NUMBER,
     )
 
     if not result.get("ok"):
