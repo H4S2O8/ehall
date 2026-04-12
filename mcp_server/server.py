@@ -539,7 +539,7 @@ def schedule_book(
     book_date: str,
     prefer_times: str = "",
     open_time: str = "07:00",
-    pulse_before: int = 60,
+    pulse_before: int = 120,
     pulse_after: int = 60,
     pulse_max: int = 10,
 ) -> dict:
@@ -552,7 +552,7 @@ def schedule_book(
     :param prefer_times:  期望时段，逗号分隔，如 "18:00-20:00,20:00-22:00"。
                           留空则自动选第一个空闲时段。
     :param open_time:     预约窗口开放时刻，格式 "HH:MM"，默认 "07:00"。
-    :param pulse_before:  开放前多少秒开始发请求，默认 60。
+    :param pulse_before:  开放前多少秒开始发请求，默认 120（脚本在开放前 2 分钟启动，后台等待）。
     :param pulse_after:   开放后多少秒内继续发请求，默认 60。
     :param pulse_max:     脉冲窗口内最多发多少次请求，默认 10，成功即退出。
 
@@ -585,7 +585,9 @@ def schedule_book(
     # 即：在 book_date 的前一天，open_time 前 pulse_before 秒启动脚本
     fire_base = datetime.datetime(book_dt.year, book_dt.month, book_dt.day, hh, mm, 0)
     fire_base -= datetime.timedelta(days=1)          # 提前一天（预约当天的前一天）
-    fire_dt   = fire_base - datetime.timedelta(seconds=pulse_before)
+    # crontab 精度只到分钟，向下取整到整分，再减 pulse_before 秒（向上取整到分）
+    pulse_before_min = (pulse_before + 59) // 60    # 秒转分，向上取整
+    fire_dt = fire_base.replace(second=0, microsecond=0) - datetime.timedelta(minutes=pulse_before_min)
 
     # date_offset：脚本运行当天到 book_date 的天数差
     run_date  = fire_dt.date()
