@@ -36,6 +36,10 @@ Part 2 - 江湾生活园区台球室（新光华悦动馆, resource_id=751, sub_
     billiards_get_availability  查询台球室未来 N 天空闲时段
     billiards_book              预约台球室时段（自动提交工作流表单）
     billiards_cancel            取消台球室预约
+
+Part 3 - 一次性定时预约:
+    schedule_book        在指定时刻写入 crontab，一次性执行 auto_book.py，完成后自动删除自身
+    cancel_scheduled_book 取消尚未触发的定时预约（从 crontab 删除）
 """
 
 import datetime
@@ -523,6 +527,127 @@ def billiards_cancel(reserve_id: Optional[int] = None) -> str:
     se = _get_booking_session()
     cancel_reserve(se, reserve_id)
     return "取消成功"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Part 3  一次性定时预约
+# ══════════════════════════════════════════════════════════════════════════
+
+@app.tool()
+def schedule_book(
+    venue_name: str,
+    fire_datetime: str,
+    prefer_times: str = "",
+    date_offset: int = 1,
+) -> dict:
+    """
+    在指定时刻（fire_datetime）一次性运行 auto_book.py 预约场馆，
+    任务执行完后自动从 crontab 删除，不会重复触发。
+
+    :param venue_name:    场馆名称，须在 automations/venues.py 列表中，
+                          如 "江湾综合体育馆-网球"、"南区网球场-网球"。
+    :param fire_datetime: 触发时刻，格式 "YYYY-MM-DD HH:MM"，
+                          建议设为预约开放时间前 60 秒，如 "2026-04-13 06:59"。
+    :param prefer_times:  期望时段，逗号分隔，如 "18:00-20:00,20:00-22:00"。
+                          留空则自动选第一个空闲时段。
+    :param date_offset:   预约哪天，相对 fire_datetime 当天的偏移天数，默认 1（即明天）。
+
+    返回:
+        {
+          "crontab_entry": "59 6 13 4 * ...",  # 写入的 cron 行
+          "fire_at": "2026-04-13 06:59",
+          "venue_name": "江湾综合体育馆-网球",
+          "prefer_times": "18:00-20:00"
+        }
+    """
+    import shlex
+    import subprocess
+    import tempfile
+
+    # 解析触发时刻
+    try:
+        fire_dt = datetime.datetime.strptime(fire_datetime, "%Y-%m-%d %H:%M")
+    except ValueError:
+        raise ValueError(f"fire_datetime 格式错误，应为 'YYYY-MM-DD HH:MM'，收到: {fire_datetime!r}")
+
+    # 找项目根目录（server.py 在 mcp_server/，根目录是上一层）
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    uv_bin = "uv"  # 假设 uv 在 PATH；若不在可改为绝对路径
+
+    # 构造环境变量覆盖
+    env_overrides = f"BOOK_VENUE_NAME={shlex.quote(venue_name)}"
+    if prefer_times:
+        env_overrides += f" BOOK_PREFER_TIMES={shlex.quote(prefer_times)}"
+    if date_offset != 1:
+        env_overrides += f" BOOK_DATE_OFFSET={date_offset}"
+
+    # 标记字符串，用于事后删除自身
+    tag = f"# ehall-once:{venue_name}"
+
+    # cron 格式：分 时 日 月 *
+    cron_time = f"{fire_dt.minute} {fire_dt.hour} {fire_dt.day} {fire_dt.month} *"
+
+    # 完整 cron 行：执行完后用 crontab -l | grep -v tag | crontab - 删除自身
+    cmd = (
+        f"cd {shlex.quote(project_root)} && "
+        f"{env_overrides} {uv_bin} run python automations/auto_book.py "
+        f">> /tmp/auto_book.log 2>&1 ; "
+        f"crontab -l 2>/dev/null | grep -v {shlex.quote(tag)} | crontab -"
+    )
+    cron_line = f"{cron_time} {cmd} {tag}"
+
+    # 读取现有 crontab，追加新行，写回
+    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    existing = result.stdout if result.returncode == 0 else ""
+
+    # 去掉同场馆的旧任务（避免重复）
+    lines = [l for l in existing.splitlines() if tag not in l]
+    lines.append(cron_line)
+    new_crontab = "\n".join(lines) + "\n"
+
+    with tempfile.NamedTemporaryFile("w", suffix=".cron", delete=False) as f:
+        f.write(new_crontab)
+        tmp_path = f.name
+
+    subprocess.run(["crontab", tmp_path], check=True)
+    os.unlink(tmp_path)
+
+    return {
+        "crontab_entry": cron_line,
+        "fire_at": fire_dt.strftime("%Y-%m-%d %H:%M"),
+        "venue_name": venue_name,
+        "prefer_times": prefer_times,
+    }
+
+
+@app.tool()
+def cancel_scheduled_book(venue_name: str) -> str:
+    """
+    取消尚未触发的一次性定时预约（从 crontab 删除对应条目）。
+
+    :param venue_name: 创建时传入的场馆名称，与 schedule_book 保持一致。
+
+    返回: "已取消" 或 "未找到对应的定时任务"
+    """
+    import subprocess, tempfile
+
+    tag = f"# ehall-once:{venue_name}"
+    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    if result.returncode != 0:
+        return "未找到对应的定时任务"
+
+    lines = result.stdout.splitlines()
+    new_lines = [l for l in lines if tag not in l]
+    if len(new_lines) == len(lines):
+        return "未找到对应的定时任务"
+
+    new_crontab = "\n".join(new_lines) + "\n"
+    with tempfile.NamedTemporaryFile("w", suffix=".cron", delete=False) as f:
+        f.write(new_crontab)
+        tmp_path = f.name
+    subprocess.run(["crontab", tmp_path], check=True)
+    os.unlink(tmp_path)
+    return "已取消"
 
 
 # ── 入口 ───────────────────────────────────────────────────────────────────
