@@ -16,6 +16,7 @@ dependencies = [
 # Phase 3: MCP Server
 mcp = [
     "mcp",
+    "uvicorn",
 ]
 
 [project.scripts]

@@ -15,6 +15,8 @@ Phase 3: 将 fudan_spider booking API 封装为 MCP Tools
     fudan_major          专业代码（预约活动室必填，如 081200）
     fudan_email          邮箱（预约活动室必填）
     fudan_activity_desc  活动简介（预约活动室必填）
+    MCP_AUTH_TOKEN       SSE 模式鉴权 token（可选；设置后客户端需携带
+                         Authorization: Bearer <token> 请求头）
 
 包含三组工具:
 
@@ -548,6 +550,26 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.transport == "sse":
-        app.run(transport="sse", host=args.host, port=args.port)
+        auth_token = os.environ.get("MCP_AUTH_TOKEN", "").strip()
+
+        if auth_token:
+            # 套 Bearer token 鉴权中间件
+            import uvicorn
+            from starlette.middleware import Middleware
+            from starlette.middleware.base import BaseHTTPMiddleware
+            from starlette.responses import Response
+
+            class BearerAuthMiddleware(BaseHTTPMiddleware):
+                async def dispatch(self, request, call_next):
+                    header = request.headers.get("Authorization", "")
+                    if header == f"Bearer {auth_token}":
+                        return await call_next(request)
+                    return Response("Unauthorized", status_code=401)
+
+            starlette_app = app.sse_app()
+            starlette_app.add_middleware(BearerAuthMiddleware)
+            uvicorn.run(starlette_app, host=args.host, port=args.port)
+        else:
+            app.run(transport="sse", host=args.host, port=args.port)
     else:
         app.run(transport="stdio")

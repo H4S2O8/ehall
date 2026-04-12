@@ -55,6 +55,7 @@ uv run python -m tests.test_phase1_booking  # 体育场馆预约
 | `fudan_activity_desc` | 活动简介（如 `打台球`） | 视场馆而定 |
 | `fudan_application_file` | 申请表扫描件路径（可选，不填则上传占位图片） | 可选 |
 | `BARK_URL` | Bark 推送地址，用于手机通知 | 可选 |
+| `MCP_AUTH_TOKEN` | SSE 模式鉴权 token（远端部署时建议设置） | 可选 |
 
 > **关于 TOTP 密钥**：在 [id.fudan.edu.cn](https://id.fudan.edu.cn) → 个人中心 → 安全设置 → 动态口令 中绑定，绑定时记录 base32 密钥填入 `fudan_otp_secret`。
 
@@ -189,6 +190,32 @@ server {
     }
 }
 ```
+
+**（推荐）开启 Bearer token 鉴权**
+
+在服务端 `.env` 中设置：
+
+```bash
+MCP_AUTH_TOKEN=your-secret-token   # 自定义一个随机字符串
+```
+
+设置后 server 启动时会自动启用鉴权，未携带正确 token 的请求一律返回 401。
+
+客户端配置中加入 `Authorization` 请求头：
+
+```json
+{
+  "mcpServers": {
+    "fudan-booking": {
+      "type": "sse",
+      "url": "http://your-server-ip:8000/sse",
+      "headers": { "Authorization": "Bearer your-secret-token" }
+    }
+  }
+}
+```
+
+> 不设置 `MCP_AUTH_TOKEN` 时不启用鉴权（兼容本地开发）。
 
 #### 客户端配置
 
