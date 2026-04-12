@@ -330,30 +330,35 @@ def _pulse_schedule(open_ts: float, before: float, after: float, n: int,
     def arcsinh_toward_zero(radius: float, count: int, k: float = 3.0) -> list[float]:
         """
         在 (0, radius] 上生成 count 个偏移量，越靠近 0 越密集。
-        均匀取 [1/(count+1), ..., count/(count+1)]，
-        用 arcsinh 压缩后映射回 [0, radius]。
+        策略：均匀点经 sinh 拉伸后，小值区间被压缩（密集），大值区间被拉伸（稀疏）。
+        返回从小到大排列的偏移量列表。
         """
         if count <= 0:
             return []
-        # 均匀点 [1..count] / (count+1)，避免端点
+        # 均匀点 [1..count] / (count+1)，映射到 [-k, k] 后取 sinh
+        # sinh 在 0 附近斜率小（密集），两端斜率大（稀疏）
+        # 我们只取正半段 [0, k]，对应偏移从 0 到 radius
         uniform = [(i + 1) / (count + 1) for i in range(count)]
-        # arcsinh 压缩：将 [0,1] 映射到 [0, arcsinh(k)]，值越小越靠近 0
-        scale = math.asinh(k)
-        compressed = [math.asinh(u * k) / scale for u in uniform]
-        # 乘以 radius，得到偏移量（从小到大 = 从 open_ts 向外）
-        return [c * radius for c in compressed]
+        # 映射到 (0, k]
+        lo_s = math.sinh(0)          # = 0
+        hi_s = math.sinh(k)
+        # sinh 正半段：值从小到大，但间隔从密到稀（靠近0密）
+        stretched = [math.sinh(u * k) for u in uniform]
+        # 归一化到 [0, radius]
+        return [s / hi_s * radius for s in stretched]
 
     half_d         = dense_n // 2
     dense_before_n = half_d
     dense_after_n  = dense_n - half_d
 
-    # 密集区前半（open_ts 前）：偏移从小到大 → 时间从 open_ts 向前
+    # 密集区前半（open_ts 前）：偏移从小到大 = 距 open_ts 近到远
+    # open_ts - offset → 时间从近到远（即时间轴上从大到小），sort 后自然排好
     before_offsets = arcsinh_toward_zero(dense_radius, dense_before_n)
-    dense_before   = [open_ts - off for off in before_offsets]   # 已从近到远，sort 后正确
+    dense_before   = [open_ts - off for off in before_offsets]   # 近→远，时间大→小
 
-    # 密集区后半（open_ts 后）：偏移从小到大 → 时间从 open_ts 向后
+    # 密集区后半（open_ts 后）：偏移从小到大 = 距 open_ts 近到远
     after_offsets = arcsinh_toward_zero(dense_radius, dense_after_n)
-    dense_after   = [open_ts + off for off in after_offsets]
+    dense_after   = [open_ts + off for off in after_offsets]     # 近→远，时间小→大
 
     # 稀疏区：均匀分布
     def uniform_pts(lo: float, hi: float, count: int) -> list[float]:
