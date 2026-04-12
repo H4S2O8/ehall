@@ -10,18 +10,45 @@
 
 ### 配置（写入项目根目录的 `.env`）
 
+#### 推荐：按名字选场馆
+
+```bash
+BOOK_VENUE_NAME=羽毛球-本部   # 从下方列表选填，脚本自动填充 ID
+```
+
+运行以下命令查看完整场馆列表：
+
+```bash
+uv run python automations/venues.py
+```
+
+输出示例：
+
+```
+别名                 类型        resource_id   说明
+-----------------------------------------------------------------
+羽毛球-本部          sports      1119          邯郸校区羽毛球馆
+羽毛球-江湾          sports      1120          江湾校区羽毛球馆
+乒乓球-本部          sports      1121          邯郸校区乒乓球室
+台球室               activity    751           台球室（workflow5 审批）
+...（更多见 automations/venues.py）
+```
+
+#### 全部配置项
+
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `BOOK_VENUE_TYPE` | 场馆类型：`sports`（体育场馆）或 `activity`（活动室） | `sports` |
-| `BOOK_RESOURCE_ID` | 父场馆 ID（见下方"如何查询 ID"） | **必填** |
-| `BOOK_SUB_IDS` | 子场地 ID 列表，逗号分隔（`sports` 模式用，留空则自动选） | 空 |
+| `BOOK_VENUE_NAME` | 场馆名称（从 venues.py 列表中选填，自动推断 ID） | 空 |
+| `BOOK_VENUE_TYPE` | 手动指定类型：`sports` 或 `activity`（覆盖字典） | `sports` |
+| `BOOK_RESOURCE_ID` | 手动指定父场馆 ID（覆盖字典） | 空 |
+| `BOOK_SUB_IDS` | 子场地 ID 列表，逗号分隔（留空则自动选） | 空 |
 | `BOOK_PREFER_TIMES` | 期望时段，逗号分隔，如 `18:00-20:00,20:00-22:00` | 任意空闲 |
 | `BOOK_DATE_OFFSET` | 预约哪天，相对今天的偏移天数 | `1`（明天） |
 | `BOOK_NUMBER` | 预约人数 | `1` |
 | `BOOK_OPEN_TIME` | 预约窗口开放时刻（`HH:MM`） | `07:00` |
 | `BOOK_PULSE_BEFORE` | 开放前多少秒开始发请求 | `60` |
 | `BOOK_PULSE_AFTER` | 开放后多少秒内继续发请求 | `60` |
-| `BOOK_PULSE_MAX` | 脉冲窗口内最多发多少次请求 | `10` |
+| `BOOK_PULSE_MAX` | 脉冲窗口内最多发多少次请求（**成功即退出**） | `10` |
 
 **脉冲分布说明**：请求时刻采用 sinh 拉伸分布，中间密集、两端稀疏。例如默认 10 次、前后各 60s：
 
@@ -35,10 +62,11 @@
 
 `activity` 模式还会读取 `fudan_major`、`fudan_email`、`fudan_phone`、`fudan_activity_desc`、`fudan_application_file`（均已在根目录 `.env.example` 中说明）。
 
-### 如何查询场馆 ID
+### 如何更新场馆列表
+
+`automations/venues.py` 维护已知场馆字典。若学校新增场馆或 ID 有变，可手动查询后更新：
 
 ```python
-# 在项目根目录执行
 from dotenv import load_dotenv; load_dotenv()
 from fudan_spider.apis.booking import login_booking, get_resource_list
 
@@ -46,6 +74,8 @@ se = login_booking()
 for r in get_resource_list(se):
     print(r["id"], r["name"])
 ```
+
+将查到的 ID 填入 `venues.py` 的 `VENUES` 字典即可。
 
 ### 手动运行
 

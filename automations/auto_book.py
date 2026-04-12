@@ -8,9 +8,19 @@
   - activity 活动室类场馆（需要 workflow5 审批表单，调用 launch_resource）
 
 配置方式（通过环境变量，写在 .env 中）：
+
+  # ── 推荐：按名字选场馆（自动填充 ID）──────────────────────────────────
+  BOOK_VENUE_NAME      场馆名称，从 automations/venues.py 中的已知列表选填。
+                       例如 "羽毛球-本部"、"台球室"、"badminton"。
+                       设置后自动推断 BOOK_VENUE_TYPE / BOOK_RESOURCE_ID / BOOK_SUB_IDS，
+                       无需手动查 ID。运行 `uv run python automations/venues.py` 查看完整列表。
+
+  # ── 手动指定 ID（优先级高于 BOOK_VENUE_NAME）───────────────────────────
   BOOK_VENUE_TYPE      场馆类型，"sports" 或 "activity"（默认 sports）
   BOOK_RESOURCE_ID     父场馆 ID（sports 模式用）或 group_id（activity 模式用）
   BOOK_SUB_IDS         子场地 ID 列表，英文逗号分隔（sports 模式用，留空则自动查询）
+
+  # ── 通用配置 ────────────────────────────────────────────────────────────
   BOOK_PREFER_TIMES    期望时段列表，英文逗号分隔，格式如 "18:00-20:00,20:00-22:00"
                        按顺序匹配第一个空闲的时段；留空则取第一个空闲时段
   BOOK_DATE_OFFSET     预约哪一天，相对于今天的偏移天数（默认 1，即明天）
@@ -19,16 +29,11 @@
   # ── 脉冲抢占模式（Pulse Mode）────────────────────────────────────────
   # 在预约窗口开放时刻（BOOK_OPEN_TIME）附近密集发请求，越近整点越密集。
   # 脚本需在 BOOK_OPEN_TIME 前至少 BOOK_PULSE_BEFORE 秒启动。
-  #
   BOOK_OPEN_TIME       预约窗口开放的时刻，格式 "HH:MM"（默认 "07:00"）
   BOOK_PULSE_BEFORE    开放前多少秒开始发请求（默认 60）
   BOOK_PULSE_AFTER     开放后多少秒内继续发请求（默认 60）
   BOOK_PULSE_MAX       脉冲窗口内最多发多少次请求（默认 10）
-                       间隔按指数分布，越接近开放时刻越密集。
-  #
-  # 示例：BOOK_PULSE_BEFORE=60, BOOK_PULSE_AFTER=60, BOOK_PULSE_MAX=10
-  # 脚本在 06:59:00 前启动，在 [06:59:00, 07:01:00] 内发 10 次请求，
-  # 第 1 次在 06:59:00，最后一次在 07:01:00，间隔从 24s 逐步缩短至 2s 再扩大。
+                       间隔按 sinh 分布，越接近开放时刻越密集，成功即退出。
 
   # ── activity 模式额外需要（也可直接读 fudan_* 变量）─────────────────
   # fudan_major / fudan_email / fudan_phone / fudan_activity_desc
@@ -66,9 +71,42 @@ log = logging.getLogger("auto_book")
 
 # ── 读取配置 ────────────────────────────────────────────────────────────────
 
-VENUE_TYPE       = os.getenv("BOOK_VENUE_TYPE", "sports").strip().lower()
-RESOURCE_ID      = int(os.getenv("BOOK_RESOURCE_ID", "0"))
-SUB_IDS_RAW      = os.getenv("BOOK_SUB_IDS", "").strip()
+from automations.venues import lookup as _venue_lookup
+
+# 1. 先尝试按名字从字典解析
+_venue_name = os.getenv("BOOK_VENUE_NAME", "").strip()
+_venue_info = _venue_lookup(_venue_name) if _venue_name else None
+
+if _venue_info and not os.getenv("BOOK_RESOURCE_ID"):
+    # 字典命中且用户未手动覆盖 ID
+    VENUE_TYPE  = _venue_info.venue_type
+    RESOURCE_ID = _venue_info.resource_id
+    _sub_default = _venue_info.sub_ids
+    log_prefix  = f"[venue_name={_venue_name}]"
+elif _venue_name and not _venue_info:
+    # 名字写了但没找到
+    import logging as _log_tmp
+    _log_tmp.basicConfig()
+    _log_tmp.getLogger("auto_book").error(
+        "BOOK_VENUE_NAME=%r 未在 venues.py 中找到，请运行 "
+        "`uv run python automations/venues.py` 查看可用列表",
+        _venue_name,
+    )
+    sys.exit(1)
+else:
+    # 手动配置模式（BOOK_RESOURCE_ID 优先）
+    VENUE_TYPE  = os.getenv("BOOK_VENUE_TYPE", "sports").strip().lower()
+    RESOURCE_ID = int(os.getenv("BOOK_RESOURCE_ID", "0"))
+    _sub_default: list[int] = []
+    log_prefix  = "[manual]"
+
+# 2. BOOK_SUB_IDS 可以覆盖字典中的子场地列表
+SUB_IDS_RAW = os.getenv("BOOK_SUB_IDS", "").strip()
+SUB_IDS: list[int] = (
+    [int(x.strip()) for x in SUB_IDS_RAW.split(",") if x.strip()]
+    if SUB_IDS_RAW else _sub_default
+)
+
 PREFER_TIMES_RAW = os.getenv("BOOK_PREFER_TIMES", "").strip()
 DATE_OFFSET      = int(os.getenv("BOOK_DATE_OFFSET", "1"))
 NUMBER           = int(os.getenv("BOOK_NUMBER", "1"))
@@ -78,12 +116,6 @@ OPEN_TIME_STR  = os.getenv("BOOK_OPEN_TIME", "07:00").strip()   # 开放时刻 H
 PULSE_BEFORE   = int(os.getenv("BOOK_PULSE_BEFORE", "60"))      # 开放前多少秒开始
 PULSE_AFTER    = int(os.getenv("BOOK_PULSE_AFTER",  "60"))      # 开放后多少秒截止
 PULSE_MAX      = int(os.getenv("BOOK_PULSE_MAX",    "10"))      # 最多发多少次
-
-# 解析子场地 ID 列表（sports 模式）
-SUB_IDS: list[int] = (
-    [int(x.strip()) for x in SUB_IDS_RAW.split(",") if x.strip()]
-    if SUB_IDS_RAW else []
-)
 
 # 解析期望时段列表，如 ["18:00-20:00", "20:00-22:00"]
 PREFER_TIMES: list[str] = (
@@ -142,10 +174,7 @@ def _run_sports(target_date: datetime.date) -> None:
 
     slot = _pick_slot(available)
     if slot is None:
-        msg = f"{target_date} 场馆 {RESOURCE_ID} 无空闲时段"
-        log.warning(msg)
-        _notify(msg)
-        return
+        raise RuntimeError(f"{target_date} 场馆 {RESOURCE_ID} 无空闲时段")
 
     # 子场地 ID：优先用配置，否则用 slot 里查到的
     sub_ids = SUB_IDS if SUB_IDS else [slot["sub_resource_id"]]
@@ -168,9 +197,7 @@ def _run_sports(target_date: datetime.date) -> None:
     if not result.get("ok"):
         reason = result.get("reason", "unknown")
         msg_   = result.get("message", "")
-        log.warning("预约未成功: %s — %s", reason, msg_)
-        _notify(f"预约失败({reason}): {msg_}")
-        return
+        raise RuntimeError(f"预约失败({reason}): {msg_}")
 
     success_msg = f"预约成功: {target_date} {slot['str_time']}"
     log.info(success_msg)
@@ -226,10 +253,7 @@ def _run_activity(target_date: datetime.date) -> None:
     log.info("空闲时段: %s", [s["str_time"] for s in available])
     slot = _pick_slot(available)
     if slot is None:
-        msg = f"{target_date} 活动室 {RESOURCE_ID} 无空闲时段"
-        log.warning(msg)
-        _notify(msg)
-        return
+        raise RuntimeError(f"{target_date} 活动室 {RESOURCE_ID} 无空闲时段")
 
     log.info("准备预约: %s %s sub_id=%d time_id=%d",
              target_date, slot["str_time"], slot["sub_resource_id"], slot["time_id"])
@@ -244,9 +268,7 @@ def _run_activity(target_date: datetime.date) -> None:
     if not result.get("ok"):
         reason = result.get("reason", "unknown")
         msg_   = result.get("message", "")
-        log.warning("预约未成功: %s — %s", reason, msg_)
-        _notify(f"预约失败({reason}): {msg_}")
-        return
+        raise RuntimeError(f"预约失败({reason}): {msg_}")
 
     process_id = result.get("process_id")
     log.info("launch 成功，process_id=%s，开始填写 workflow5 审批表单 ...", process_id)
@@ -316,9 +338,9 @@ def main() -> None:
     now = time.time()
 
     log.info(
-        "脉冲预约模式: type=%s resource_id=%d date=%s open=%s "
+        "%s 脉冲预约模式: type=%s resource_id=%d date=%s open=%s "
         "window=[-%ds,+%ds] max=%d次",
-        VENUE_TYPE, RESOURCE_ID, target_date, OPEN_TIME_STR,
+        log_prefix, VENUE_TYPE, RESOURCE_ID, target_date, OPEN_TIME_STR,
         PULSE_BEFORE, PULSE_AFTER, PULSE_MAX,
     )
     log.info(
