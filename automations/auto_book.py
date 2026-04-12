@@ -293,27 +293,60 @@ def _run_activity(target_date: datetime.date) -> None:
 
 # ── 主入口 ──────────────────────────────────────────────────────────────────
 
-def _pulse_schedule(open_ts: float, before: float, after: float, n: int) -> list[float]:
+def _pulse_schedule(open_ts: float, before: float, after: float, n: int,
+                    dense_radius: float = 10.0) -> list[float]:
     """
-    生成 n 个绝对时间戳（秒），分布在 [open_ts - before, open_ts + after] 窗口内。
+    生成 n 个绝对时间戳，分布在 [open_ts - before, open_ts + after] 窗口内。
 
-    分布策略：在窗口内取 n 个点，使间隔关于开放时刻呈"指数收缩"，
-    即越靠近 open_ts 越密集，越远越稀疏。
+    保证：
+    1. open_ts 本身必定是其中一个点。
+    2. [open_ts - dense_radius, open_ts + dense_radius] 窗口内高度密集。
+    3. 窗口外（稀疏区）极度稀疏——只在边缘各放少量探测点。
 
-    做法：将 [-before, +after] 映射到 [-1, 1]，用 sinh 的反函数（arcsinh）
-    将均匀分布的 n 个点拉伸到中间密、两端稀的分布，再映射回时间轴。
+    分配策略（n >= 4 时）：
+      - 1 个点固定为 open_ts
+      - dense_n = max(1, round(n * 0.7)) 个点放在密集区（±dense_radius）
+      - 剩余点均分到前稀疏区和后稀疏区
+    每段内用 sinh 拉伸使密集区点更集中于 open_ts。
     """
     import math
-    window = before + after
-    # 在 [0, 1] 上均匀取 n 个点
-    unit = [i / (n - 1) for i in range(n)] if n > 1 else [0.5]
-    # 映射到 [-before, +after]：先转到 [-1,1]，用 sinh 拉伸后再还原
-    k = 3.0  # 拉伸系数，越大越集中在中心
-    stretched = [math.sinh(k * (u * 2 - 1)) for u in unit]
-    lo, hi = stretched[0], stretched[-1]
-    # 归一化回 [-before, +after]
-    offsets = [(s - lo) / (hi - lo) * window - before for s in stretched]
-    return [open_ts + off for off in offsets]
+
+    if n == 1:
+        return [open_ts]
+    if n == 2:
+        return [open_ts - before, open_ts]
+    if n == 3:
+        return [open_ts - before, open_ts, open_ts + after]
+
+    dense_n  = max(2, round((n - 1) * 0.7))   # 密集区点数（不含 open_ts 本身）
+    sparse_n = n - 1 - dense_n                  # 稀疏区总点数（前后合计）
+    sparse_before = max(1, sparse_n // 2)
+    sparse_after  = sparse_n - sparse_before
+
+    def sinh_points(lo: float, hi: float, count: int, k: float = 3.0) -> list[float]:
+        """在 [lo, hi] 内生成 count 个 sinh 拉伸点（不含端点）。"""
+        if count <= 0:
+            return []
+        pts = [(i + 1) / (count + 1) for i in range(count)]
+        s = [math.sinh(k * (p * 2 - 1)) for p in pts]
+        lo_s, hi_s = math.sinh(-k), math.sinh(k)
+        return [lo + (v - lo_s) / (hi_s - lo_s) * (hi - lo) for v in s]
+
+    # 密集区：[open_ts - dense_radius, open_ts + dense_radius]，以 open_ts 为中心
+    half_d = dense_n // 2
+    dense_before_n = half_d
+    dense_after_n  = dense_n - half_d
+    dense_pts = (
+        sinh_points(open_ts - dense_radius, open_ts, dense_before_n, k=4.0) +
+        sinh_points(open_ts, open_ts + dense_radius, dense_after_n,  k=4.0)
+    )
+
+    # 稀疏区
+    sparse_pts_before = sinh_points(open_ts - before, open_ts - dense_radius, sparse_before, k=1.5)
+    sparse_pts_after  = sinh_points(open_ts + dense_radius, open_ts + after,  sparse_after,  k=1.5)
+
+    all_pts = sorted(sparse_pts_before + dense_pts + [open_ts] + sparse_pts_after)
+    return all_pts
 
 
 def main() -> None:
