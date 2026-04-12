@@ -300,14 +300,18 @@ def _pulse_schedule(open_ts: float, before: float, after: float, n: int,
 
     保证：
     1. open_ts 本身必定是其中一个点。
-    2. [open_ts - dense_radius, open_ts + dense_radius] 窗口内高度密集。
-    3. 窗口外（稀疏区）极度稀疏——只在边缘各放少量探测点。
+    2. 密集区 [open_ts - dense_radius, open_ts + dense_radius] 内的点
+       越靠近 open_ts 越密集（间隔指数收缩）。
+    3. 密集区外极度稀疏，只放少量边缘探测点。
 
-    分配策略（n >= 4 时）：
+    分配：
       - 1 个点固定为 open_ts
-      - dense_n = max(1, round(n * 0.7)) 个点放在密集区（±dense_radius）
-      - 剩余点均分到前稀疏区和后稀疏区
-    每段内用 sinh 拉伸使密集区点更集中于 open_ts。
+      - dense_n = round((n-1) * 0.7) 个点分布在密集区（前后各半）
+      - 剩余点均分到前/后稀疏区
+
+    密集区用 arcsinh 反变换：在 [0, dense_radius] 上均匀取点后
+    用 arcsinh 压缩，使间隔向 0（即 open_ts）处指数收缩。
+    稀疏区均匀分布即可。
     """
     import math
 
@@ -318,34 +322,50 @@ def _pulse_schedule(open_ts: float, before: float, after: float, n: int,
     if n == 3:
         return [open_ts - before, open_ts, open_ts + after]
 
-    dense_n  = max(2, round((n - 1) * 0.7))   # 密集区点数（不含 open_ts 本身）
-    sparse_n = n - 1 - dense_n                  # 稀疏区总点数（前后合计）
+    dense_n       = max(2, round((n - 1) * 0.7))
+    sparse_n      = n - 1 - dense_n
     sparse_before = max(1, sparse_n // 2)
     sparse_after  = sparse_n - sparse_before
 
-    def sinh_points(lo: float, hi: float, count: int, k: float = 3.0) -> list[float]:
-        """在 [lo, hi] 内生成 count 个 sinh 拉伸点（不含端点）。"""
+    def arcsinh_toward_zero(radius: float, count: int, k: float = 3.0) -> list[float]:
+        """
+        在 (0, radius] 上生成 count 个偏移量，越靠近 0 越密集。
+        均匀取 [1/(count+1), ..., count/(count+1)]，
+        用 arcsinh 压缩后映射回 [0, radius]。
+        """
         if count <= 0:
             return []
-        pts = [(i + 1) / (count + 1) for i in range(count)]
-        s = [math.sinh(k * (p * 2 - 1)) for p in pts]
-        lo_s, hi_s = math.sinh(-k), math.sinh(k)
-        return [lo + (v - lo_s) / (hi_s - lo_s) * (hi - lo) for v in s]
+        # 均匀点 [1..count] / (count+1)，避免端点
+        uniform = [(i + 1) / (count + 1) for i in range(count)]
+        # arcsinh 压缩：将 [0,1] 映射到 [0, arcsinh(k)]，值越小越靠近 0
+        scale = math.asinh(k)
+        compressed = [math.asinh(u * k) / scale for u in uniform]
+        # 乘以 radius，得到偏移量（从小到大 = 从 open_ts 向外）
+        return [c * radius for c in compressed]
 
-    # 密集区：[open_ts - dense_radius, open_ts + dense_radius]，以 open_ts 为中心
-    half_d = dense_n // 2
+    half_d         = dense_n // 2
     dense_before_n = half_d
     dense_after_n  = dense_n - half_d
-    dense_pts = (
-        sinh_points(open_ts - dense_radius, open_ts, dense_before_n, k=4.0) +
-        sinh_points(open_ts, open_ts + dense_radius, dense_after_n,  k=4.0)
-    )
 
-    # 稀疏区
-    sparse_pts_before = sinh_points(open_ts - before, open_ts - dense_radius, sparse_before, k=1.5)
-    sparse_pts_after  = sinh_points(open_ts + dense_radius, open_ts + after,  sparse_after,  k=1.5)
+    # 密集区前半（open_ts 前）：偏移从小到大 → 时间从 open_ts 向前
+    before_offsets = arcsinh_toward_zero(dense_radius, dense_before_n)
+    dense_before   = [open_ts - off for off in before_offsets]   # 已从近到远，sort 后正确
 
-    all_pts = sorted(sparse_pts_before + dense_pts + [open_ts] + sparse_pts_after)
+    # 密集区后半（open_ts 后）：偏移从小到大 → 时间从 open_ts 向后
+    after_offsets = arcsinh_toward_zero(dense_radius, dense_after_n)
+    dense_after   = [open_ts + off for off in after_offsets]
+
+    # 稀疏区：均匀分布
+    def uniform_pts(lo: float, hi: float, count: int) -> list[float]:
+        if count <= 0:
+            return []
+        step = (hi - lo) / (count + 1)
+        return [lo + step * (i + 1) for i in range(count)]
+
+    sparse_pts_before = uniform_pts(open_ts - before, open_ts - dense_radius, sparse_before)
+    sparse_pts_after  = uniform_pts(open_ts + dense_radius, open_ts + after,  sparse_after)
+
+    all_pts = sorted(sparse_pts_before + dense_before + [open_ts] + dense_after + sparse_pts_after)
     return all_pts
 
 
