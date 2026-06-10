@@ -17,6 +17,7 @@ dependencies = [
 mcp = [
     "mcp",
     "uvicorn",
+    "rookiepy",
 ]
 
 [project.scripts]
@@ -24,6 +25,9 @@ fudan-mcp = "mcp_server.server:app.run"
 
 [dependency-groups]
 dev = [
+    "nodriver>=0.50.3",
     "playwright>=1.58.0",
+    "playwright-stealth>=2.0.3",
     "pytest",
+    "rookiepy>=0.5.6",
 ]

@@ -40,6 +40,25 @@ BOOKING_BASE = "https://booking.fudan.edu.cn"
 TOPIC_ID     = 48  # 体育场馆
 
 
+def _load_chrome_waf_cookies() -> dict:
+    """
+    从本机 Chrome 读取 booking.fudan.edu.cn 的 WAF 质询 cookie。
+    WAF（瑞数）会检查 TLS 指纹，纯 requests session 无法通过；
+    用真实浏览器已解过质询的 cookie 注入后可绕过。
+    """
+    try:
+        import rookiepy
+        waf_names = {"7GdWaAWutylUO", "7GdWaAWutylUP", "0a2b5cfd50f6f39396"}
+        cookies = {
+            c["name"]: c["value"]
+            for c in rookiepy.chrome(["booking.fudan.edu.cn"])
+            if c["name"] in waf_names
+        }
+        return cookies
+    except Exception:
+        return {}
+
+
 def login_booking(uis_session: Session | None = None) -> Session:
     """
     完成 booking.fudan.edu.cn 的 SSO 登录。
@@ -55,35 +74,54 @@ def login_booking(uis_session: Session | None = None) -> Session:
                         传 None 时重新完整登录。
     :returns: 同一个 Session（已追加 booking cookies）
     """
+    import fudan_spider.uis as _uis_mod
     from fudan_spider.uis import login as _uis_login
     import os
 
     cas_service = f"{BOOKING_BASE}/reservation/api/login/cas"
+    waf_cookies = _load_chrome_waf_cookies()
 
-    if uis_session is not None:
-        # ── 复用已有 UIS session：让 CAS 为新 service 签发 ticket ──
-        # id.fudan.edu.cn 已有 SSO session，直接请求新 service 的 ticket
-        se = uis_session
-        r = se.get(
-            "https://id.fudan.edu.cn/authserver/login",
-            params={"service": cas_service},
-            allow_redirects=True,
-        )
-        # 如果 booking 已经有 reservation_uid，直接返回
-        if any(c.name == "reservation_uid" for c in se.cookies):
-            se.headers["Referer"] = (
-                f"{BOOKING_BASE}/reservation/fe/site/special/special?id={TOPIC_ID}"
+    def _patched_build_session():
+        se = _uis_mod._orig_build_session()
+        for name, val in waf_cookies.items():
+            se.cookies.set(name, val, domain="booking.fudan.edu.cn", path="/")
+        return se
+
+    # 临时注入 WAF cookies 到 build_session（仅当有 cookie 时）
+    if waf_cookies and not hasattr(_uis_mod, "_orig_build_session"):
+        _uis_mod._orig_build_session = _uis_mod.build_session
+        _uis_mod.build_session = _patched_build_session
+
+    try:
+        if uis_session is not None:
+            # ── 复用已有 UIS session：让 CAS 为新 service 签发 ticket ──
+            se = uis_session
+            for name, val in waf_cookies.items():
+                se.cookies.set(name, val, domain="booking.fudan.edu.cn", path="/")
+            se.get(
+                "https://id.fudan.edu.cn/authserver/login",
+                params={"service": cas_service},
+                allow_redirects=True,
             )
-            return se
-        # 否则说明 UIS session 已过期，回退到完整登录
-    
-    # ── 完整登录（首次 or UIS session 过期）────────────────────
-    se = _uis_login(
-        username   = os.getenv("fudan_username"),
-        password   = os.getenv("fudan_password"),
-        otp_secret = os.getenv("fudan_otp_secret", ""),
-        service    = cas_service,
-    )
+            if any(c.name == "reservation_uid" for c in se.cookies):
+                se.headers["Referer"] = (
+                    f"{BOOKING_BASE}/reservation/fe/site/special/special?id={TOPIC_ID}"
+                )
+                return se
+            # UIS session 已过期，回退到完整登录
+
+        # ── 完整登录（首次 or UIS session 过期）────────────────────
+        se = _uis_login(
+            username   = os.getenv("fudan_username"),
+            password   = os.getenv("fudan_password"),
+            otp_secret = os.getenv("fudan_otp_secret", ""),
+            service    = cas_service,
+        )
+    finally:
+        if hasattr(_uis_mod, "_orig_build_session"):
+            _uis_mod.build_session = _uis_mod._orig_build_session
+            del _uis_mod._orig_build_session
+
     se.headers["Referer"] = (
         f"{BOOKING_BASE}/reservation/fe/site/special/special?id={TOPIC_ID}"
     )
