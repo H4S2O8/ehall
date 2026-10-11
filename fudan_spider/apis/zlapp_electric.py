@@ -7,7 +7,7 @@ zlapp.fudan.edu.cn 用电 API
 
 import re
 from html import unescape
-from requests import Session
+from curl_cffi.requests import Session
 
 BASE = "https://zlapp.fudan.edu.cn"
 

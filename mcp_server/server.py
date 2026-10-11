@@ -28,6 +28,7 @@ Part 0 - 校园卡 & 宿舍用电:
 
 Part 1 - 体育场馆（TOPIC_ID=48, /api/ 系 API）:
     sports_list_venues        查询所有体育场馆列表
+    sports_get_schedule       查询指定场馆某天的完整占用表
     sports_get_availability   查询指定场馆未来 N 天空闲时段
     sports_book               预约体育场馆时段
     sports_cancel             取消体育场馆预约
@@ -280,12 +281,112 @@ def sports_list_venues() -> list[dict]:
 
 
 @app.tool()
+def sports_get_schedule(
+    resource_id: int,
+    date: str = "",
+) -> dict:
+    """
+    查询指定体育场馆某天的完整占用表。
+
+    适用于排查“sports_get_availability 返回 [] 到底是无空闲，还是查询异常”。
+    若场馆当天所有格子都被活动或比赛占满，本工具会返回完整的占用明细。
+
+    注意：occupy 字段对任意日期都准确；user / sign_status / content 三个字段
+    只在查询**今天**时有值（来自 large-screen 接口），查未来日期时为空。
+
+    :param resource_id: 场馆 ID，通过 sports_list_venues 获取。
+    :param date:        查询日期，格式 "YYYY-MM-DD"。留空时默认今天。
+
+    返回示例:
+        {
+          "date": "2026-04-20",
+          "time_slots": [{"id": 3968, "str_time": "08:00-09:00"}, ...],
+          "sub_resources": [{"id": 1120, "name": "1号场地"}, ...],
+          "summary": {
+            "total_slots": 168,
+            "free_slots": 0,
+            "occupied_slots": 168
+          },
+          "slots": [
+            {
+              "sub_resource_id": 1120,
+              "sub_resource_name": "1号场地",
+              "time_id": 3968,
+              "str_time": "08:00-09:00",
+              "occupy": True,
+              "sign_status": 0,
+              "user": "体教部 乒乓球院系杯",
+              "content": "体教部 乒乓球院系杯"
+            },
+            ...
+          ]
+        }
+    """
+    from fudan_spider.apis.booking import get_schedule
+
+    se = _get_booking_session()
+    if not date:
+        date = datetime.date.today().isoformat()
+
+    schedule = get_schedule(se, resource_id, date)
+    time_map = {str(t["id"]): t for t in schedule["time_slots"]}
+    sub_map = {str(r["id"]): r["name"] for r in schedule["sub_resources"]}
+
+    slots = []
+    free_slots = 0
+    occupied_slots = 0
+
+    for rid_str, sub_slots in schedule["availability"].items():
+        for tid_str, cell in sub_slots.items():
+            occupy = cell.get("occupy", True)
+            if occupy:
+                occupied_slots += 1
+            else:
+                free_slots += 1
+
+            slots.append({
+                "sub_resource_id": int(rid_str),
+                "sub_resource_name": sub_map.get(rid_str, rid_str),
+                "time_id": int(tid_str),
+                "str_time": time_map.get(tid_str, {}).get("str_time", tid_str),
+                "occupy": occupy,
+                "sign_status": cell.get("sign_status"),
+                "user": cell.get("user", ""),
+                "content": cell.get("content", ""),
+            })
+
+    return {
+        "date": date,
+        "time_slots": [
+            {"id": t["id"], "str_time": t["str_time"]}
+            for t in schedule["time_slots"]
+        ],
+        "sub_resources": [
+            {"id": r["id"], "name": r["name"]}
+            for r in schedule["sub_resources"]
+        ],
+        "summary": {
+            "total_slots": free_slots + occupied_slots,
+            "free_slots": free_slots,
+            "occupied_slots": occupied_slots,
+        },
+        "slots": slots,
+    }
+
+
+@app.tool()
 def sports_get_availability(
     resource_id: int,
     days: int = 3,
 ) -> list[dict]:
     """
     查询指定体育场馆未来 N 天的空闲时段。
+
+    注意:
+      - 本工具只返回“空闲格子”，按日期真实查询（基于 calendar 接口的剩余名额）。
+      - 若返回 []，可能表示“该日期确实没有任何空闲时段”，并不一定是接口异常。
+      - 未来日期在预约窗口开放前也能看到名额，但此时 sports_book 会返回 not_in_service_time。
+      - 如需查看完整占用情况，请改用 sports_get_schedule。
 
     :param resource_id: 场馆 ID，通过 sports_list_venues 获取。
     :param days:        查询未来天数，默认 3 天（含今天）。
@@ -539,35 +640,50 @@ def schedule_book(
     book_date: str,
     prefer_times: str = "",
     open_time: str = "07:00",
-    pulse_before: int = 120,
-    pulse_after: int = 60,
-    pulse_max: int = 10,
+    retry_gap: float = 1.5,
+    deadline_min: int = 10,
     sub_ids: str = "",
+    book_advance_days: int = 0,
     override_fire_time: str = "",
 ) -> dict:
     """
-    在预约窗口开放前写入 crontab，用脉冲算法抢占预约，成功后自动删除 crontab 条目。
+    在预约窗口开放前写入 crontab，开放时刻单发抢占，成功后自动删除 crontab 条目。
 
-    :param venue_name:         场馆名称，须在 automations/venues.py 列表中，
-                               如 "江湾综合体育馆-网球"、"南区网球场-网球"。
+    抢占策略（2026-09 实测得出）：开放前 60s 登录，开放后 0.3s 发第一枪，
+    失败隔 retry_gap 秒再发，遇到「前方拥挤/点击太频繁」立即换 session 重登，
+    坚持 deadline_min 分钟。密集连发会被限流，所以 retry_gap 不要小于 1。
+
+    :param venue_name:         场馆名称，**必须**与 automations/venues.py 中的键名完全一致。
+                               使用前务必先运行 `uv run python automations/venues.py` 确认实际名称，
+                               或调用 sports_list_venues 查看系统返回的 name 字段。
+                               名称不匹配会导致 auto_book.py 启动时直接报错退出。
     :param book_date:          要预约的日期，格式 "YYYY-MM-DD"（即你想去的那天）。
     :param prefer_times:       期望时段，逗号分隔，如 "18:00-20:00,20:00-22:00"。
                                留空则自动选第一个空闲时段。
     :param open_time:          预约窗口开放时刻，格式 "HH:MM"，默认 "07:00"。
-    :param pulse_before:       开放前多少秒开始发请求，默认 120。
-    :param pulse_after:        开放后多少秒内继续发请求，默认 60。
-    :param pulse_max:          脉冲窗口内最多发多少次请求，默认 10，成功即退出。
+    :param retry_gap:          两次提交之间的最小间隔秒数，默认 1.5。
+    :param deadline_min:       开放后最多坚持多少分钟，默认 10。
     :param sub_ids:            指定子场地 ID，逗号分隔，如 "1131" 表示12号场地。
                                留空则由 venues.py 配置或自动选择。
+    :param book_advance_days:  预约提前天数。不同场馆的预约窗口开放规则不同：
+                                 - 乒乓球等室内场馆：提前1天开放（默认），book_advance_days=1
+                                 - 网球场等室外场馆：提前2天开放，book_advance_days=2
+                               设为 0 时退化为旧逻辑（book_date 前一天触发）。
+                               正确值应确保 open_time 那天 + book_advance_days = book_date。
     :param override_fire_time: 直接指定 crontab 触发时间，格式 "HH:MM"（今天日期）。
                                用于测试场景，绕过自动计算。留空则正常推算。
+
+    预约窗口规则（实测）:
+      - 乒乓球（江湾综合体育馆等）：T-1 日 07:00 开放 T 日的预约
+      - 网球（江湾室外体育场等）：  T-2 日 07:00 开放 T 日的预约
+      即：4月19日的网球场，在4月17日 07:00 开抢（book_advance_days=2）。
 
     返回:
         {
           "crontab_entry": "59 6 13 4 * ...",
           "fire_at": "2026-04-13 06:59",
           "book_date": "2026-04-14",
-          "venue_name": "江湾综合体育馆-网球",
+          "venue_name": "江湾综合体育馆-乒乓球",
           "prefer_times": "18:00-20:00,20:00-22:00"
         }
     """
@@ -599,23 +715,24 @@ def schedule_book(
         run_date = fire_dt.date()
         date_offset = (book_dt - run_date).days
     else:
-        # 正常模式：book_date 前一天的 open_time 前 pulse_before+60s
-        fire_base = datetime.datetime(book_dt.year, book_dt.month, book_dt.day, hh, mm, 0)
-        fire_base -= datetime.timedelta(days=1)
-        pulse_window_start = fire_base - datetime.timedelta(seconds=pulse_before)
-        fire_dt = (pulse_window_start - datetime.timedelta(minutes=1)).replace(second=0, microsecond=0)
+        # 正常模式：根据 book_advance_days 计算 open_time 所在日
+        if book_advance_days > 0:
+            # open_day = book_date - book_advance_days 天
+            open_day = book_dt - datetime.timedelta(days=book_advance_days)
+        else:
+            # 旧逻辑：book_date 前一天（兼容）
+            open_day = book_dt - datetime.timedelta(days=1)
+        fire_base = datetime.datetime(open_day.year, open_day.month, open_day.day, hh, mm, 0)
+        # 开放前 2 分钟触发，脚本自己等到 open-60s 登录、open+0.3s 提交
+        fire_dt = (fire_base - datetime.timedelta(minutes=2)).replace(second=0, microsecond=0)
         run_date  = fire_dt.date()
         date_offset = (book_dt - run_date).days
 
     # 找项目根目录（server.py 在 mcp_server/，根目录是上一层）
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    # uv 绝对路径：cron 环境 PATH 极简，必须用绝对路径
-    uv_bin = shlex.quote(
-        subprocess.run(["which", "uv"], capture_output=True, text=True).stdout.strip()
-        or "uv"
-    )
+    uv_bin = subprocess.run(["which", "uv"], capture_output=True, text=True).stdout.strip() or "uv"
 
-    # 构造环境变量覆盖（含脉冲参数）
+    # 构造环境变量覆盖
     env_parts = [f"BOOK_VENUE_NAME={shlex.quote(venue_name)}"]
     if prefer_times:
         env_parts.append(f"BOOK_PREFER_TIMES={shlex.quote(prefer_times)}")
@@ -624,42 +741,26 @@ def schedule_book(
     if date_offset != 1:
         env_parts.append(f"BOOK_DATE_OFFSET={date_offset}")
     env_parts.append(f"BOOK_OPEN_TIME={shlex.quote(open_time)}")
-    env_parts.append(f"BOOK_PULSE_BEFORE={pulse_before}")
-    env_parts.append(f"BOOK_PULSE_AFTER={pulse_after}")
-    env_parts.append(f"BOOK_PULSE_MAX={pulse_max}")
+    env_parts.append(f"BOOK_RETRY_GAP={retry_gap}")
+    env_parts.append(f"BOOK_DEADLINE_MIN={deadline_min}")
     env_overrides = " ".join(env_parts)
 
-    # 标记字符串，用于事后删除自身
-    tag = f"# ehall-once:{venue_name}"
+    # 用 crontab 调度，自删逻辑在 auto_book.py 的 __main__ 块里（Python 进程执行，LANG 正常）
+    import hashlib
+    tag = f"ehall-{hashlib.md5(venue_name.encode()).hexdigest()[:8]}"  # ASCII tag，用于去重/取消
 
-    # cron 格式：分 时 日 月 *
     cron_time = f"{fire_dt.minute} {fire_dt.hour} {fire_dt.day} {fire_dt.month} *"
-
-    # 自删命令：用绝对路径调用 crontab，避免 cron 环境 PATH 不全
-    crontab_bin = shlex.quote(
-        subprocess.run(["which", "crontab"], capture_output=True, text=True).stdout.strip()
-        or "/usr/bin/crontab"
-    )
-    self_remove = (
-        f"{crontab_bin} -l 2>/dev/null "
-        f"| grep -v {shlex.quote(tag)} "
-        f"| {crontab_bin} -"
-    )
-
-    # 完整 cron 行：执行完后自动删除自身
-    cmd = (
+    cron_line = (
+        f"{cron_time} "
         f"cd {shlex.quote(project_root)} && "
-        f"{env_overrides} {uv_bin} run python automations/auto_book.py "
-        f">> /tmp/auto_book.log 2>&1 ; "
-        f"{self_remove}"
+        f"{env_overrides} {shlex.quote(uv_bin)} run python automations/auto_book.py "
+        f">> /tmp/auto_book.log 2>&1 "
+        f"#{tag}"
     )
-    cron_line = f"{cron_time} {cmd} {tag}"
 
-    # 读取现有 crontab，追加新行，写回
+    # 去掉同场馆的旧任务，写入新任务
     proc = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
     existing = proc.stdout if proc.returncode == 0 else ""
-
-    # 去掉同场馆的旧任务（避免重复）
     lines = [l for l in existing.splitlines() if tag not in l]
     lines.append(cron_line)
     new_crontab = "\n".join(lines) + "\n"
@@ -667,7 +768,6 @@ def schedule_book(
     with tempfile.NamedTemporaryFile("w", suffix=".cron", delete=False) as f:
         f.write(new_crontab)
         tmp_path = f.name
-
     subprocess.run(["crontab", tmp_path], check=True)
     os.unlink(tmp_path)
 
@@ -678,7 +778,7 @@ def schedule_book(
         "venue_name": venue_name,
         "prefer_times": prefer_times,
         "open_time": open_time,
-        "pulse_window": f"-{pulse_before}s ~ +{pulse_after}s，最多 {pulse_max} 次",
+        "strategy": f"开放后 0.3s 单发，间隔 {retry_gap}s，限流换 session，坚持 {deadline_min} 分钟",
     }
 
 
@@ -691,9 +791,9 @@ def cancel_scheduled_book(venue_name: str) -> str:
 
     返回: "已取消" 或 "未找到对应的定时任务"
     """
-    import subprocess, tempfile
+    import subprocess, hashlib, tempfile
 
-    tag = f"# ehall-once:{venue_name}"
+    tag = f"ehall-{hashlib.md5(venue_name.encode()).hexdigest()[:8]}"
     result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
     if result.returncode != 0:
         return "未找到对应的定时任务"
@@ -703,12 +803,15 @@ def cancel_scheduled_book(venue_name: str) -> str:
     if len(new_lines) == len(lines):
         return "未找到对应的定时任务"
 
-    new_crontab = "\n".join(new_lines) + "\n"
-    with tempfile.NamedTemporaryFile("w", suffix=".cron", delete=False) as f:
-        f.write(new_crontab)
-        tmp_path = f.name
-    subprocess.run(["crontab", tmp_path], check=True)
-    os.unlink(tmp_path)
+    if new_lines:
+        new_crontab = "\n".join(new_lines) + "\n"
+        with tempfile.NamedTemporaryFile("w", suffix=".cron", delete=False) as f:
+            f.write(new_crontab)
+            tmp_path = f.name
+        subprocess.run(["crontab", tmp_path], check=True)
+        os.unlink(tmp_path)
+    else:
+        subprocess.run(["crontab", "-r"], check=True)
     return "已取消"
 
 

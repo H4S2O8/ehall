@@ -10,6 +10,7 @@ dependencies = [
     "python-dotenv",
     "pycryptodome>=3.23.0",
     "pyotp",
+    "curl-cffi>=0.7",
 ]
 
 [project.optional-dependencies]
@@ -17,7 +18,8 @@ dependencies = [
 mcp = [
     "mcp",
     "uvicorn",
-    "rookiepy",
+    "playwright>=1.58.0",   # 无头 Chrome 解瑞数 WAF 质询
+    "rookiepy>=0.5.6",      # 兜底：读本机 Chrome 的 WAF cookie
 ]
 
 [project.scripts]

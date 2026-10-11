@@ -12,7 +12,10 @@
         每项: { base: { id, name, type, config, ... }, ... }
 
   GET /api/resource/large-screen?id=<resource_id>&date=YYYY-MM-DD
-      → 指定场馆+日期的完整时段占用情况
+      → 完整时段占用情况（带姓名/签到）。**注意：date 参数被服务端忽略，只返回今天。**
+
+  GET /site/resource/calendar?id=<resource_id>&date={"start_date":..,"end_date":..}
+      → 真正按日期返回的名额表，num 为剩余名额（"0" = 已占用）。get_schedule 以此为准。
         {
           "time":     [ { id, str_time, start_time, end_time }, ... ],
           "resource": [ { id, name }, ... ],    # 子场地列表
@@ -33,30 +36,103 @@
 """
 
 import datetime
+import logging
+import time
 from typing import Optional
-from requests import Session
+from curl_cffi.requests import Session
+
+from fudan_spider.apis.waf_browser import waf_post
+
+log = logging.getLogger(__name__)
 
 BOOKING_BASE = "https://booking.fudan.edu.cn"
 TOPIC_ID     = 48  # 体育场馆
 
+_WAF_COOKIE_NAMES = {"7GdWaAWutylUO", "7GdWaAWutylUP", "0a2b5cfd50f6f39396"}
 
-def _load_chrome_waf_cookies() -> dict:
+
+_WAF_PAGE = f"{BOOKING_BASE}/reservation/fe/site/special/special?id={TOPIC_ID}"
+
+
+def _solve_waf_headless_sync(timeout: float) -> list[tuple[str, str, str]]:
     """
-    从本机 Chrome 读取 booking.fudan.edu.cn 的 WAF 质询 cookie。
-    WAF（瑞数）会检查 TLS 指纹，纯 requests session 无法通过；
-    用真实浏览器已解过质询的 cookie 注入后可绕过。
+    用本机 Chrome（无头）打开不设拦截的前端页，让瑞数质询 JS 跑完，取回 cookie。
+
+    瑞数会识别自动化浏览器并下发无效 cookie（API 回 400），实测需同时：
+      - --disable-blink-features=AutomationControlled（去掉 navigator.webdriver）
+      - UA 中的 "HeadlessChrome" 改回 "Chrome"
+    拿到的 cookie 不绑定 TLS 指纹和 UA，可直接交给 curl_cffi 使用。
     """
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True, channel="chrome",
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        try:
+            probe = browser.new_page()
+            ua = probe.evaluate("navigator.userAgent").replace("HeadlessChrome", "Chrome")
+            probe.close()
+
+            ctx = browser.new_context(user_agent=ua)
+            page = ctx.new_page()
+            page.goto(_WAF_PAGE, wait_until="domcontentloaded", timeout=timeout * 1000)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                cookies = [
+                    (c["name"], c["value"], "booking.fudan.edu.cn")
+                    for c in ctx.cookies()
+                    if c["name"] in _WAF_COOKIE_NAMES
+                ]
+                if len(cookies) == len(_WAF_COOKIE_NAMES):
+                    return cookies
+                time.sleep(0.25)
+            raise RuntimeError("WAF 质询超时，未拿到全部 cookie")
+        finally:
+            browser.close()
+
+
+def _solve_waf_headless(timeout: float = 40.0) -> list[tuple[str, str, str]]:
+    """
+    _solve_waf_headless_sync 的入口。Playwright 同步 API 不能在运行中的 asyncio
+    事件循环里调用（FastMCP 的同步工具就跑在循环里），此时改到独立线程执行。
+    """
+    import asyncio
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _solve_waf_headless_sync(timeout)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(_solve_waf_headless_sync, timeout).result()
+
+
+def _load_chrome_waf_cookies() -> list[tuple[str, str, str]]:
+    """从本机 Chrome 的 cookie 库读取 WAF cookie（需 Chrome 近期访问过预约站）。"""
     try:
         import rookiepy
-        waf_names = {"7GdWaAWutylUO", "7GdWaAWutylUP", "0a2b5cfd50f6f39396"}
-        cookies = {
-            c["name"]: c["value"]
+        return [
+            (c["name"], c["value"], "booking.fudan.edu.cn")
             for c in rookiepy.chrome(["booking.fudan.edu.cn"])
-            if c["name"] in waf_names
-        }
-        return cookies
+            if c["name"] in _WAF_COOKIE_NAMES
+        ]
     except Exception:
-        return {}
+        return []
+
+
+def _load_waf_cookies() -> list[tuple[str, str, str]]:
+    """
+    获取 booking.fudan.edu.cn 的瑞数 WAF 质询 cookie。
+
+    WAF 对没带质询 cookie 的请求一律 412（任何 TLS 指纹都一样），质询要执行 JS 才能解。
+    优先用无头 Chrome 现场解一次（约 2 秒，总是新鲜的）；失败再退回读本机 Chrome。
+    """
+    try:
+        return _solve_waf_headless()
+    except Exception as e:
+        log.warning("无头 Chrome 解 WAF 失败，改读本机 Chrome cookie: %s", e)
+        return _load_chrome_waf_cookies()
 
 
 def login_booking(uis_session: Session | None = None) -> Session:
@@ -74,54 +150,37 @@ def login_booking(uis_session: Session | None = None) -> Session:
                         传 None 时重新完整登录。
     :returns: 同一个 Session（已追加 booking cookies）
     """
-    import fudan_spider.uis as _uis_mod
     from fudan_spider.uis import login as _uis_login
     import os
 
     cas_service = f"{BOOKING_BASE}/reservation/api/login/cas"
-    waf_cookies = _load_chrome_waf_cookies()
+    waf_cookies = _load_waf_cookies()
 
-    def _patched_build_session():
-        se = _uis_mod._orig_build_session()
-        for name, val in waf_cookies.items():
-            se.cookies.set(name, val, domain="booking.fudan.edu.cn", path="/")
-        return se
-
-    # 临时注入 WAF cookies 到 build_session（仅当有 cookie 时）
-    if waf_cookies and not hasattr(_uis_mod, "_orig_build_session"):
-        _uis_mod._orig_build_session = _uis_mod.build_session
-        _uis_mod.build_session = _patched_build_session
-
-    try:
-        if uis_session is not None:
-            # ── 复用已有 UIS session：让 CAS 为新 service 签发 ticket ──
-            se = uis_session
-            for name, val in waf_cookies.items():
-                se.cookies.set(name, val, domain="booking.fudan.edu.cn", path="/")
-            se.get(
-                "https://id.fudan.edu.cn/authserver/login",
-                params={"service": cas_service},
-                allow_redirects=True,
-            )
-            if any(c.name == "reservation_uid" for c in se.cookies):
-                se.headers["Referer"] = (
-                    f"{BOOKING_BASE}/reservation/fe/site/special/special?id={TOPIC_ID}"
-                )
-                return se
-            # UIS session 已过期，回退到完整登录
-
-        # ── 完整登录（首次 or UIS session 过期）────────────────────
-        se = _uis_login(
-            username   = os.getenv("fudan_username"),
-            password   = os.getenv("fudan_password"),
-            otp_secret = os.getenv("fudan_otp_secret", ""),
-            service    = cas_service,
+    if uis_session is not None:
+        # ── 复用已有 UIS session：让 CAS 为新 service 签发 ticket ──
+        se = uis_session
+        for name, value, domain in waf_cookies:
+            se.cookies.set(name, value, domain=domain, path="/")
+        se.get(
+            "https://id.fudan.edu.cn/authserver/login",
+            params={"service": cas_service},
+            allow_redirects=True,
         )
-    finally:
-        if hasattr(_uis_mod, "_orig_build_session"):
-            _uis_mod.build_session = _uis_mod._orig_build_session
-            del _uis_mod._orig_build_session
+        if any(c.name == "reservation_uid" for c in se.cookies):
+            se.headers["Referer"] = (
+                f"{BOOKING_BASE}/reservation/fe/site/special/special?id={TOPIC_ID}"
+            )
+            return se
+        # UIS session 已过期，回退到完整登录
 
+    # ── 完整登录（首次 or UIS session 过期）────────────────────
+    se = _uis_login(
+        username   = os.getenv("fudan_username"),
+        password   = os.getenv("fudan_password"),
+        otp_secret = os.getenv("fudan_otp_secret", ""),
+        service    = cas_service,
+        cookies    = waf_cookies,
+    )
     se.headers["Referer"] = (
         f"{BOOKING_BASE}/reservation/fe/site/special/special?id={TOPIC_ID}"
     )
@@ -192,6 +251,13 @@ def get_schedule(
     """
     查询指定场馆某天的时段占用情况。
 
+    实现说明（2026-09 实测）：
+      - /api/resource/large-screen 忽略 date 参数，无论传什么日期都返回**今天**的占用表。
+        它的优点是带预约人姓名和签到状态。
+      - /site/resource/calendar 才真正按日期返回，字段 num 为剩余名额（"0" = 已占用）。
+      因此本函数以 calendar 为准判断 occupy，仅当查询日期为今天时，再用 large-screen
+      叠加 user / sign_status / content 字段。查未来日期时这三个字段为空。
+
     :param resource_id: 场馆 ID（从 get_resource_list 获取）
     :param date:        查询日期，默认今天，格式 "YYYY-MM-DD" 或 datetime.date
     :returns: {
@@ -209,7 +275,7 @@ def get_schedule(
                 "3800": {          # 时段 id
                     "occupy":      True,
                     "sign_status": 1,
-                    "user":        "巨*波",
+                    "user":        "巨*波",   # 仅今天有值
                     "content":     ""
                 },
                 ...
@@ -222,35 +288,67 @@ def get_schedule(
     if isinstance(date, datetime.date):
         date = date.isoformat()
 
-    r = se.get(
-        f"{BOOKING_BASE}/reservation/api/resource/large-screen",
-        params={"id": resource_id, "date": date},
-    )
-    r.raise_for_status()
-    body = r.json()
-    if body.get("e") != "OK":
-        raise RuntimeError(f"resource/large-screen 失败: {body.get('m')}")
+    cal = get_calendar(se, resource_id, date)
+    day = cal["availability"].get(date, {})
 
-    d = body["d"]
+    availability: dict[str, dict[str, dict]] = {}
+    for rid, slots in day.items():
+        availability[str(rid)] = {
+            str(tid): {
+                "occupy":      str(cell.get("num", "0")) == "0",
+                "sign_status": 0,
+                "user":        "",
+                "content":     "",
+            }
+            for tid, cell in slots.items()
+        }
+
+    if date == datetime.date.today().isoformat():
+        # large-screen 只对今天有效，用它补充姓名 / 签到 / 占用原因
+        try:
+            ls = _get_large_screen(se, resource_id)
+            for rid, slots in ls.items():
+                for tid, cell in slots.items():
+                    target = availability.setdefault(str(rid), {}).get(str(tid))
+                    if target is None:
+                        continue
+                    target["sign_status"] = cell.get("sign_status", 0)
+                    target["user"]        = cell.get("user", "")
+                    target["content"]     = cell.get("content", "")
+                    if cell.get("occupy"):
+                        target["occupy"] = True
+        except Exception:
+            pass  # 补充信息拿不到不影响主结果
+
     return {
         "time_slots": [
             {
                 "id":       t["id"],
                 "str_time": t["str_time"],
-                "start":    t["start_time"],
-                "end":      t["end_time"],
+                "start":    t.get("start_time"),
+                "end":      t.get("end_time"),
             }
-            for t in d.get("time", [])
+            for t in cal["time_slots"]
         ],
-        "sub_resources": d.get("resource", []),
-        "availability":  {
-            str(rid): {
-                str(tid): slot
-                for tid, slot in slots.items()
-            }
-            for rid, slots in d.get("data", {}).items()
-        },
+        "sub_resources": cal["sub_resources"],
+        "availability":  availability,
     }
+
+
+def _get_large_screen(se: Session, resource_id: int) -> dict:
+    """
+    GET /api/resource/large-screen 的原始 data 段（仅今天）。
+    返回 { "<sub_id>": { "<time_id>": {occupy, sign_status, user, content} } }。
+    """
+    r = se.get(
+        f"{BOOKING_BASE}/reservation/api/resource/large-screen",
+        params={"id": resource_id, "date": datetime.date.today().isoformat()},
+    )
+    r.raise_for_status()
+    body = r.json()
+    if body.get("e") != "OK":
+        raise RuntimeError(f"resource/large-screen 失败: {body.get('m')}")
+    return body["d"].get("data", {}) or {}
 
 
 def get_available_slots(
@@ -383,17 +481,12 @@ def launch_resource(
 
     captcha = _json.dumps({"token": "", "pointJson": ""})
 
-    r = se.post(
-        f"{BOOKING_BASE}/reservation/site/resource/launch",
-        data={
-            "data":       data,
-            "data_colle": "[]",
-            "collective": "0",
-            "captcha":    captcha,
-        },
-    )
-    r.raise_for_status()
-    body = r.json()
+    body = waf_post(se, "/reservation/site/resource/launch", {
+        "data":       data,
+        "data_colle": "[]",
+        "collective": "0",
+        "captcha":    captcha,
+    })
     if body.get("e") != "OK":
         msg = body.get("m") or str(body)
         if "服务时间" in msg:
@@ -604,17 +697,12 @@ def book_resource(
 
     captcha = _json.dumps({"token": "", "pointJson": ""})
 
-    r = se.post(
-        f"{BOOKING_BASE}/reservation/site/resource/launch",
-        data={
-            "data":       data,
-            "data_colle": data_colle,
-            "collective": "0",
-            "captcha":    captcha,
-        },
-    )
-    r.raise_for_status()
-    body = r.json()
+    body = waf_post(se, "/reservation/site/resource/launch", {
+        "data":       data,
+        "data_colle": data_colle,
+        "collective": "0",
+        "captcha":    captcha,
+    })
     if body.get("e") != "OK":
         msg = body.get("m") or str(body)
         if "服务时间" in msg:
@@ -659,20 +747,27 @@ def cancel_reserve(
     if target is None:
         raise RuntimeError("找不到可取消的预约记录")
 
-    detail_ids = [
-        det["id"]
-        for dets in target["detail"].values()
-        for det in dets
-        if det.get("is_cancel")
-    ]
-    resp = se.post(
-        f"{BOOKING_BASE}/reservation/site/appointment/appointment-cancel",
-        data={
-            "appointment_id":        target["id"],
-            "appointment_detail_id": _json.dumps(detail_ids),
-        },
-    )
-    resp.raise_for_status()
-    body = resp.json()
+    if "appointment_time" in target:
+        # 2026-10 起的格式：appointment_time.groups[].dates[].periods[]
+        detail_ids = [
+            period["detail_id"]
+            for group in target["appointment_time"].get("groups", [])
+            for day in group.get("dates", [])
+            for period in day.get("periods", [])
+            if period.get("can_cancel")
+        ]
+    else:
+        detail_ids = [
+            det["id"]
+            for dets in target["detail"].values()
+            for det in dets
+            if det.get("is_cancel")
+        ]
+    if not detail_ids:
+        raise RuntimeError(f"预约 {target['id']} 没有可取消的时段")
+    body = waf_post(se, "/reservation/site/appointment/appointment-cancel", {
+        "appointment_id":        str(target["id"]),
+        "appointment_detail_id": _json.dumps(detail_ids),
+    })
     if body.get("e") != "OK":
         raise RuntimeError(f"取消预约失败: {body.get('m') or body}")

@@ -22,8 +22,8 @@ import base64
 import html
 
 import pyotp
-import requests
-from requests import Session
+from curl_cffi import requests
+from curl_cffi.requests import Session
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_v1_5
 
@@ -37,7 +37,7 @@ UA   = (
 
 
 def build_session() -> Session:
-    se = Session()
+    se = Session(impersonate="chrome124")
     se.headers.update({"User-Agent": UA})
     return se
 
@@ -56,6 +56,7 @@ def login(
     password: str = None,
     otp_secret: str = None,
     service: str = "https://my.fudan.edu.cn/",
+    cookies: list[tuple[str, str, str]] | None = None,
 ) -> Session:
     """
     完成 UIS 登录（含 MFA），返回已认证的 Session。
@@ -65,6 +66,8 @@ def login(
     :param otp_secret: TOTP 密钥（base32），默认读取 fudan_otp_secret
                        配置后可全自动完成 MFA；未配置时触发 MFA 抛 RuntimeError
     :param service:    目标服务，默认 my.fudan.edu.cn
+    :param cookies:    登录前预置到 Session 的 (name, value, domain)，
+                       用于带上目标站点的 WAF 质询 cookie
     :raises ValueError:   未提供账号密码
     :raises RuntimeError: 触发验证码 / 登录失败 / 未配置 TOTP 的 MFA
     """
@@ -77,6 +80,8 @@ def login(
         )
 
     se      = build_session()
+    for name, value, domain in cookies or ():
+        se.cookies.set(name, value, domain=domain, path="/")
     referer = f"{BASE}/ac/"
 
     # ── Step 1: 获取 lck ──────────────────────────────────────

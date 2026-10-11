@@ -4,7 +4,7 @@
 - TODO: 消费记录
 """
 
-from requests import Session
+from curl_cffi.requests import Session
 
 
 def get_card_info(se: Session) -> dict:

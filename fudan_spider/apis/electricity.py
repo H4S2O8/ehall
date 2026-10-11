@@ -4,7 +4,7 @@
 - TODO: 余额预警
 """
 
-from requests import Session
+from curl_cffi.requests import Session
 
 
 def get_electricity(se: Session, length: int = 20) -> dict:
